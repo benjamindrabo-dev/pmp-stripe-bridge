@@ -1,0 +1,12 @@
+{
+  "name": "square-shopify-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Custom Pay-with-Square checkout bridge for Shopify (Vercel serverless).",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  }
+}
