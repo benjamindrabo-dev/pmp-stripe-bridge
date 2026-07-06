@@ -46,6 +46,12 @@ export default async function handler(req, res) {
       params.append(`line_items[${i}][price_data][product_data][name]`, String(it.title || "Item").slice(0, 250));
       params.append(`line_items[${i}][price_data][unit_amount]`, String(Number(it.price_cents)));
       params.append(`line_items[${i}][quantity]`, String(Number(it.quantity) || 1));
+      // Product image (shown on the Stripe Checkout page, like Shopify does).
+      if (it.image) {
+        let img = String(it.image);
+        if (img.indexOf("//") === 0) img = "https:" + img;
+        params.append(`line_items[${i}][price_data][product_data][images][0]`, img);
+      }
     });
 
     const shipping = Number(process.env.FLAT_SHIPPING_CENTS || 0);
