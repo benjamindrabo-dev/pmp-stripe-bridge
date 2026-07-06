@@ -53,7 +53,21 @@ async function kvDel(key) {
   });
 }
 
-async function createShopifyOrder({ items, email, phone, shipping, note }) {
+function cleanAddress(a) {
+  if (!a || !a.address1) return undefined;
+  return {
+    name: a.name || undefined,
+    address1: a.address1,
+    address2: a.address2 || undefined,
+    city: a.city || undefined,
+    province: a.province || undefined,
+    country: a.country || undefined,
+    zip: a.zip || undefined,
+    phone: a.phone || undefined,
+  };
+}
+
+async function createShopifyOrder({ items, email, phone, shipping, billing, note }) {
   const order = {
     line_items: items.map((it) => ({ variant_id: Number(it.variant_id), quantity: Number(it.quantity) })),
     financial_status: "paid",
@@ -65,18 +79,10 @@ async function createShopifyOrder({ items, email, phone, shipping, note }) {
     send_fulfillment_receipt: false,
     inventory_behaviour: "decrement_obeying_policy",
   };
-  if (shipping && shipping.address1) {
-    order.shipping_address = {
-      name: shipping.name || undefined,
-      address1: shipping.address1,
-      address2: shipping.address2 || undefined,
-      city: shipping.city || undefined,
-      province: shipping.province || undefined,
-      country: shipping.country || undefined,
-      zip: shipping.zip || undefined,
-      phone: shipping.phone || undefined,
-    };
-  }
+  const ship = cleanAddress(shipping);
+  const bill = cleanAddress(billing);
+  if (ship) order.shipping_address = ship;
+  if (bill) order.billing_address = bill;
   const payload = { order };
   const r = await fetch(
     `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/${SHOPIFY_API}/orders.json`,
@@ -113,18 +119,21 @@ export default async function handler(req, res) {
         if (cart) {
           const cd = session.customer_details || {};
           const sd = session.shipping_details || {};
-          const addr = sd.address || cd.address || {};
-          const shipping = {
-            name: sd.name || cd.name,
-            address1: addr.line1,
-            address2: addr.line2,
-            city: addr.city,
-            province: addr.state,
-            country: addr.country,
-            zip: addr.postal_code,
-            phone: cd.phone,
-          };
-          await createShopifyOrder({ items: cart.items, email: cd.email, phone: cd.phone, shipping, note: cart.note });
+          const shipAddr = sd.address || cd.address || {};
+          const billAddr = cd.address || sd.address || {};
+          const toAddr = (a, name, phone) => ({
+            name: name,
+            address1: a.line1,
+            address2: a.line2,
+            city: a.city,
+            province: a.state,
+            country: a.country,
+            zip: a.postal_code,
+            phone: phone,
+          });
+          const shipping = toAddr(shipAddr, sd.name || cd.name, cd.phone);
+          const billing = toAddr(billAddr, cd.name || sd.name, cd.phone);
+          await createShopifyOrder({ items: cart.items, email: cd.email, phone: cd.phone, shipping, billing, note: cart.note });
           await kvDel(key); // idempotency: only create once
         }
       }
