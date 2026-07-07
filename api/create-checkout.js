@@ -35,6 +35,7 @@ export default async function handler(req, res) {
 
     const params = new URLSearchParams();
     params.append("mode", "payment");
+    params.append("locale", "en"); // force English UI (avoid region-based fr-CA)
     params.append("success_url", (process.env.SUCCESS_URL || "https://example.com/thank-you") + "?session_id={CHECKOUT_SESSION_ID}");
     params.append("cancel_url", process.env.CANCEL_URL || (process.env.STORE_ORIGIN || "https://example.com") + "/cart");
     params.append("billing_address_collection", "auto");
