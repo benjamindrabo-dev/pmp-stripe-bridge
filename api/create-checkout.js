@@ -1,8 +1,12 @@
 // POST /api/create-checkout
-// Called from the Shopify "Pay with Card (Stripe)" button.
-// Body: { items: [{ variant_id, title, quantity, price_cents }], currency, note? }
+// Called from the Shopify "Buy Now" button (embedded Stripe Checkout).
+// Body: { items: [{ variant_id, title, quantity, price_cents, image }], currency, note? }
 // `currency` comes from the Shopify cart (cart.currency) so the customer is
 // charged in the currency they see on the storefront (per Shopify Markets).
+// Returns { clientSecret } — the storefront mounts Stripe's EMBEDDED Checkout
+// with it (ui_mode=embedded_page), so the payment form renders on our own site
+// with no redirect. After payment, Stripe redirects to return_url; the webhook
+// (stripe-webhook.js) creates the paid Shopify order.
 
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", process.env.STORE_ORIGIN || "*");
@@ -35,9 +39,11 @@ export default async function handler(req, res) {
 
     const params = new URLSearchParams();
     params.append("mode", "payment");
+    params.append("ui_mode", "embedded_page"); // render Checkout embedded on our own site (no redirect)
     params.append("locale", "en"); // force English UI (avoid region-based fr-CA)
-    params.append("success_url", (process.env.SUCCESS_URL || "https://example.com/thank-you") + "?session_id={CHECKOUT_SESSION_ID}");
-    params.append("cancel_url", process.env.CANCEL_URL || (process.env.STORE_ORIGIN || "https://example.com") + "/cart");
+    // Embedded uses return_url only (no success_url/cancel_url). Stripe sends the
+    // shopper here after payment; the webhook creates the Shopify order.
+    params.append("return_url", (process.env.SUCCESS_URL || "https://example.com/thank-you") + "?session_id={CHECKOUT_SESSION_ID}");
     params.append("billing_address_collection", "auto");
     params.append("shipping_address_collection[allowed_countries][0]", "CA");
     params.append("shipping_address_collection[allowed_countries][1]", "US");
@@ -86,7 +92,7 @@ export default async function handler(req, res) {
       note: note || "",
     });
 
-    return res.status(200).json({ url: data.url });
+    return res.status(200).json({ clientSecret: data.client_secret });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "Server error", detail: String(e.message || e) });
