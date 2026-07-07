@@ -4,7 +4,7 @@
 // `currency` comes from the Shopify cart (cart.currency) so the customer is
 // charged in the currency they see on the storefront (per Shopify Markets).
 // Returns { clientSecret } — the storefront mounts Stripe's EMBEDDED Checkout
-// with it (ui_mode=embedded_page), so the payment form renders on our own site
+// with it (ui_mode=embedded), so the payment form renders on our own site
 // with no redirect. After payment, Stripe redirects to return_url; the webhook
 // (stripe-webhook.js) creates the paid Shopify order.
 
@@ -39,7 +39,7 @@ export default async function handler(req, res) {
 
     const params = new URLSearchParams();
     params.append("mode", "payment");
-    params.append("ui_mode", "embedded_page"); // render Checkout embedded on our own site (no redirect)
+    params.append("ui_mode", "embedded"); // classic Embedded Checkout (works on all API versions; "embedded_page" needs API 2026-03-25.dahlia)
     params.append("locale", "en"); // force English UI (avoid region-based fr-CA)
     // Embedded uses return_url only (no success_url/cancel_url). Stripe sends the
     // shopper here after payment; the webhook creates the Shopify order.
