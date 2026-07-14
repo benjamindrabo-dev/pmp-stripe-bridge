@@ -32,6 +32,27 @@ function cors(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
+/**
+ * Taux USD->CAD du jour. Deux sources publiques sans clé, avec bornes de
+ * sécurité (1 < taux < 2). Si les deux échouent : null -> on REFUSE le
+ * paiement plutôt que de débiter avec un taux faux.
+ */
+async function getUsdCadRate() {
+  try {
+    const r = await fetch("https://open.er-api.com/v6/latest/USD");
+    const d = await r.json();
+    const rate = d && d.rates && Number(d.rates.CAD);
+    if (rate > 1 && rate < 2) return rate;
+  } catch (e) {}
+  try {
+    const r = await fetch("https://api.frankfurter.app/latest?from=USD&to=CAD");
+    const d = await r.json();
+    const rate = d && d.rates && Number(d.rates.CAD);
+    if (rate > 1 && rate < 2) return rate;
+  } catch (e) {}
+  return null;
+}
+
 export default async function handler(req, res) {
   cors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -62,13 +83,9 @@ export default async function handler(req, res) {
 
   try {
     const { sourceId, email = "", items = [] } = req.body || {};
-    // Devise FORCÉE côté serveur (jamais celle du client). Le compte Square de
-    // Pure Majesty Pets est canadien : Square ne peut débiter qu'en CAD.
-    // NOTE BUSINESS avant go-live : la boutique affiche des prix USD ; ici le
-    // montant numérique Shopify est débité tel quel en CAD (23.99 USD affiché
-    // -> 23.99 CAD débité). Pour facturer l'équivalent réel, ajouter une
-    // conversion USD->CAD au taux du jour à cet endroit.
-    const currency = "CAD";
+    // Devises FORCÉES côté serveur (jamais celles du client) :
+    // - prix boutique en USD (source Shopify)
+    // - débit Square en CAD (compte Square canadien), converti au taux du jour.
     if (!sourceId) return res.status(400).json({ error: "Missing card token (sourceId)." });
     if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: "Cart is empty." });
 
@@ -90,6 +107,11 @@ export default async function handler(req, res) {
     }
     if (totalCents < 50) return res.status(400).json({ error: "Order total is too low." });
 
+    /* ---- 1b. Conversion USD -> CAD au taux du jour ---- */
+    const rate = await getUsdCadRate();
+    if (!rate) return res.status(503).json({ error: "Currency service unavailable — please try again in a minute." });
+    const cadCents = Math.round(totalCents * rate);
+
     /* ---- 2. Paiement Square ---- */
     const idempotencyKey = `pmp-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
     const payRes = await fetch(`${squareBase}/v2/payments`, {
@@ -103,9 +125,9 @@ export default async function handler(req, res) {
         source_id: sourceId,
         idempotency_key: idempotencyKey,
         location_id: SQUARE_LOCATION_ID,
-        amount_money: { amount: totalCents, currency },
+        amount_money: { amount: cadCents, currency: "CAD" },
         buyer_email_address: email || undefined,
-        note: "Pure Majesty Pets — online order",
+        note: `Pure Majesty Pets — ${(totalCents / 100).toFixed(2)} USD @ ${rate.toFixed(4)} = ${(cadCents / 100).toFixed(2)} CAD`,
       }),
     });
     const payData = await payRes.json();
@@ -129,9 +151,9 @@ export default async function handler(req, res) {
             email: email || undefined,
             line_items: lineItems,
             financial_status: "paid",
-            currency,
+            currency: "USD",
             tags: "square",
-            note: `Paid via Square (${SQUARE_ENV}). Payment ID: ${paymentId}`,
+            note: `Paid via Square (${SQUARE_ENV}). Payment ID: ${paymentId}. Charged ${(cadCents / 100).toFixed(2)} CAD @ ${rate.toFixed(4)} USD->CAD.`,
             transactions: [
               { kind: "sale", status: "success", amount: (totalCents / 100).toFixed(2), gateway: "Square" },
             ],
@@ -146,6 +168,9 @@ export default async function handler(req, res) {
       // Paiement pris mais commande non créée : à réconcilier à la main.
       return res.status(200).json({
         paymentId,
+        amountUSD: (totalCents / 100).toFixed(2),
+        chargedCAD: (cadCents / 100).toFixed(2),
+        rate: rate.toFixed(4),
         warning: "Payment captured but Shopify order creation failed — create it manually.",
         shopifyError: orderData.errors || null,
       });
@@ -155,6 +180,9 @@ export default async function handler(req, res) {
       paymentId,
       orderId: orderData.order.id,
       orderName: orderData.order.name,
+      amountUSD: (totalCents / 100).toFixed(2),
+      chargedCAD: (cadCents / 100).toFixed(2),
+      rate: rate.toFixed(4),
     });
   } catch (e) {
     return res.status(500).json({ error: e.message || "Unexpected middleware error." });
