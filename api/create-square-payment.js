@@ -61,7 +61,14 @@ export default async function handler(req, res) {
     : "https://connect.squareupsandbox.com";
 
   try {
-    const { sourceId, currency = "USD", email = "", items = [] } = req.body || {};
+    const { sourceId, email = "", items = [] } = req.body || {};
+    // Devise FORCÉE côté serveur (jamais celle du client). Le compte Square de
+    // Pure Majesty Pets est canadien : Square ne peut débiter qu'en CAD.
+    // NOTE BUSINESS avant go-live : la boutique affiche des prix USD ; ici le
+    // montant numérique Shopify est débité tel quel en CAD (23.99 USD affiché
+    // -> 23.99 CAD débité). Pour facturer l'équivalent réel, ajouter une
+    // conversion USD->CAD au taux du jour à cet endroit.
+    const currency = "CAD";
     if (!sourceId) return res.status(400).json({ error: "Missing card token (sourceId)." });
     if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: "Cart is empty." });
 
