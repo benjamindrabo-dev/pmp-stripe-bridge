@@ -47,8 +47,13 @@ export default async function handler(req, res) {
   } = process.env;
   const SHOP = SHOPIFY_STORE_DOMAIN || SHOPIFY_SHOP;
 
-  if (!SQUARE_ACCESS_TOKEN || !SQUARE_LOCATION_ID || !SHOP || !SHOPIFY_ADMIN_TOKEN) {
-    return res.status(500).json({ error: "Middleware not configured (missing env vars)." });
+  const missing = [];
+  if (!SQUARE_ACCESS_TOKEN) missing.push("SQUARE_ACCESS_TOKEN");
+  if (!SQUARE_LOCATION_ID) missing.push("SQUARE_LOCATION_ID");
+  if (!SHOP) missing.push("SHOPIFY_STORE_DOMAIN");
+  if (!SHOPIFY_ADMIN_TOKEN) missing.push("SHOPIFY_ADMIN_TOKEN");
+  if (missing.length) {
+    return res.status(500).json({ error: "Middleware not configured. Missing env vars: " + missing.join(", ") });
   }
 
   const squareBase = SQUARE_ENV === "production"
