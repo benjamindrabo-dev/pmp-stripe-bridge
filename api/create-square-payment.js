@@ -82,10 +82,14 @@ export default async function handler(req, res) {
     : "https://connect.squareupsandbox.com";
 
   try {
-    const { sourceId, email = "", items = [] } = req.body || {};
+    const { sourceId, email = "", items = [], shipping = {} } = req.body || {};
     // Devises FORCÉES côté serveur (jamais celles du client) :
     // - prix boutique en USD (source Shopify)
     // - débit Square en CAD (compte Square canadien), converti au taux du jour.
+    if (!email) return res.status(400).json({ error: "Missing email." });
+    const shipOk = shipping && shipping.first_name && shipping.last_name && shipping.address1 &&
+      shipping.city && shipping.zip && shipping.province && ["US", "CA"].includes(shipping.country_code);
+    if (!shipOk) return res.status(400).json({ error: "Missing or invalid shipping address." });
     if (!sourceId) return res.status(400).json({ error: "Missing card token (sourceId)." });
     if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: "Cart is empty." });
 
@@ -127,6 +131,16 @@ export default async function handler(req, res) {
         location_id: SQUARE_LOCATION_ID,
         amount_money: { amount: cadCents, currency: "CAD" },
         buyer_email_address: email || undefined,
+        shipping_address: {
+          address_line_1: shipping.address1,
+          address_line_2: shipping.address2 || undefined,
+          locality: shipping.city,
+          administrative_district_level_1: shipping.province,
+          postal_code: shipping.zip,
+          country: shipping.country_code,
+          first_name: shipping.first_name,
+          last_name: shipping.last_name,
+        },
         note: `Pure Majesty Pets — ${(totalCents / 100).toFixed(2)} USD @ ${rate.toFixed(4)} = ${(cadCents / 100).toFixed(2)} CAD`,
       }),
     });
@@ -150,6 +164,28 @@ export default async function handler(req, res) {
           order: {
             email: email || undefined,
             line_items: lineItems,
+            shipping_address: {
+              first_name: shipping.first_name,
+              last_name: shipping.last_name,
+              address1: shipping.address1,
+              address2: shipping.address2 || undefined,
+              city: shipping.city,
+              province: shipping.province,
+              zip: shipping.zip,
+              country_code: shipping.country_code,
+              phone: shipping.phone || undefined,
+            },
+            billing_address: {
+              first_name: shipping.first_name,
+              last_name: shipping.last_name,
+              address1: shipping.address1,
+              address2: shipping.address2 || undefined,
+              city: shipping.city,
+              province: shipping.province,
+              zip: shipping.zip,
+              country_code: shipping.country_code,
+              phone: shipping.phone || undefined,
+            },
             financial_status: "paid",
             currency: "USD",
             tags: "square",
