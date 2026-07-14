@@ -32,7 +32,7 @@ function cors(req, res) {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 }
 
-module.exports = async function handler(req, res) {
+export default async function handler(req, res) {
   cors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -147,4 +147,4 @@ module.exports = async function handler(req, res) {
   } catch (e) {
     return res.status(500).json({ error: e.message || "Unexpected middleware error." });
   }
-};
+}
