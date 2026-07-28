@@ -47,6 +47,60 @@ async function kvDel(key) {
   });
 }
 
+// ---- Meta Conversions API (server-side purchase tracking) ----
+// Deduplicated with the browser pixel: both send event_id = Stripe session id.
+// Requires env vars META_PIXEL_ID and META_CAPI_TOKEN (token is a SECRET —
+// set it in Vercel → Environment Variables, never in the code/repo).
+const sha256 = (v) =>
+  crypto.createHash("sha256").update(String(v).trim().toLowerCase()).digest("hex");
+
+async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart, address, name }) {
+  const pixelId = process.env.META_PIXEL_ID;
+  const token = process.env.META_CAPI_TOKEN;
+  if (!pixelId || !token) return; // not configured yet — skip silently
+
+  const user_data = {};
+  if (email) user_data.em = [sha256(email)];
+  if (phone) user_data.ph = [sha256(String(phone).replace(/[^0-9]/g, ""))];
+  if (name) {
+    const parts = String(name).trim().split(/\s+/);
+    if (parts[0]) user_data.fn = [sha256(parts[0])];
+    if (parts.length > 1) user_data.ln = [sha256(parts[parts.length - 1])];
+  }
+  if (address) {
+    if (address.city) user_data.ct = [sha256(String(address.city).replace(/\s/g, ""))];
+    if (address.state) user_data.st = [sha256(address.state)];
+    if (address.postal_code) user_data.zp = [sha256(String(address.postal_code).replace(/\s/g, ""))];
+    if (address.country) user_data.country = [sha256(address.country)];
+  }
+  if (cart && cart.fbp) user_data.fbp = cart.fbp;
+  if (cart && cart.fbc) user_data.fbc = cart.fbc;
+  if (cart && cart.ip) user_data.client_ip_address = cart.ip;
+  if (cart && cart.ua) user_data.client_user_agent = cart.ua;
+
+  const body = {
+    data: [
+      {
+        event_name: "Purchase",
+        event_time: Math.floor(Date.now() / 1000),
+        event_id: sessionId,                  // dedupe key shared with the pixel
+        action_source: "website",
+        event_source_url: process.env.SUCCESS_URL || undefined,
+        user_data,
+        custom_data: { value: Number(value), currency: String(currency).toUpperCase() },
+      },
+    ],
+  };
+
+  const r = await fetch(
+    `https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${encodeURIComponent(token)}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
+  );
+  const j = await r.json();
+  if (!r.ok) console.error("Meta CAPI failed:", JSON.stringify(j));
+  else console.log("Meta CAPI ok:", JSON.stringify(j));
+}
+
 function cleanAddress(a) {
   if (!a || !a.address1) return undefined;
   return {
@@ -135,6 +189,20 @@ export default async function handler(req, res) {
             billing: toAddr(billAddr, cd.name || sd.name, cd.phone),
             note: cart.note,
           });
+          // Server-side ad tracking (never blocks the order creation).
+          try {
+            await sendMetaPurchase({
+              sessionId: session.id,
+              email: cd.email,
+              phone: cd.phone,
+              value: (Number(session.amount_total) || 0) / 100,
+              currency: session.currency || cart.currency,
+              cart,
+              address: shipAddr,
+              name: sd.name || cd.name,
+            });
+          } catch (e) { console.error("Meta CAPI error", e); }
+
           await kvDel(key); // idempotency: only create once
         } else {
           console.error("Cart not found in Upstash for", key);

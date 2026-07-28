@@ -30,7 +30,7 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    const { items, note, currency } = req.body || {};
+    const { items, note, currency, fbp, fbc } = req.body || {};
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "Empty cart" });
     }
@@ -93,6 +93,12 @@ export default async function handler(req, res) {
       items: items.map((it) => ({ variant_id: it.variant_id, quantity: it.quantity, price_cents: Number(it.price_cents) })),
       currency: CUR,
       note: note || "",
+      // Ad-attribution signals captured at checkout time; the webhook forwards
+      // them to Meta's Conversions API for accurate match quality.
+      fbp: fbp || null,
+      fbc: fbc || null,
+      ua: req.headers["user-agent"] || null,
+      ip: String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || null,
     });
 
     return res.status(200).json({ clientSecret: data.client_secret });
