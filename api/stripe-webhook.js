@@ -54,12 +54,15 @@ async function kvDel(key) {
 const sha256 = (v) =>
   crypto.createHash("sha256").update(String(v).trim().toLowerCase()).digest("hex");
 
-async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart, address, name }) {
+async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart, address, name, orderId, orderNumber }) {
   const pixelId = process.env.META_PIXEL_ID;
   const token = process.env.META_CAPI_TOKEN;
   if (!pixelId || !token) return; // not configured yet — skip silently
 
   const user_data = {};
+  // external_id = a stable, hashed customer identifier. Meta weighs it heavily
+  // in Event Match Quality, so we derive it from the email.
+  if (email) user_data.external_id = [sha256(email)];
   if (email) user_data.em = [sha256(email)];
   if (phone) user_data.ph = [sha256(String(phone).replace(/[^0-9]/g, ""))];
   if (name) {
@@ -87,7 +90,22 @@ async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart
         action_source: "website",
         event_source_url: process.env.SUCCESS_URL || undefined,
         user_data,
-        custom_data: { value: Number(value), currency: String(currency).toUpperCase() },
+        // Richer custom_data = better reporting, catalog matching and retargeting.
+        custom_data: {
+          value: Number(value),
+          currency: String(currency).toUpperCase(),
+          content_type: "product",
+          num_items: (cart && cart.items) ? cart.items.reduce((n, it) => n + (Number(it.quantity) || 1), 0) : undefined,
+          content_ids: (cart && cart.items) ? cart.items.map((it) => String(it.variant_id)) : undefined,
+          contents: (cart && cart.items) ? cart.items.map((it) => ({
+            id: String(it.variant_id),
+            quantity: Number(it.quantity) || 1,
+            item_price: (Number(it.price_cents) || 0) / 100,
+          })) : undefined,
+          // order_id lets Meta recognise the same purchase coming from another
+          // source (e.g. Shopify's own integration) and avoid double counting.
+          order_id: orderNumber ? String(orderNumber) : (orderId ? String(orderId) : undefined),
+        },
       },
     ],
   };
@@ -180,7 +198,7 @@ export default async function handler(req, res) {
             name, address1: a.line1, address2: a.line2, city: a.city,
             province: a.state, country: a.country, zip: a.postal_code, phone,
           });
-          await createShopifyOrder({
+          const createdOrder = await createShopifyOrder({
             items: cart.items,
             currency: cart.currency,
             email: cd.email,
@@ -200,6 +218,8 @@ export default async function handler(req, res) {
               cart,
               address: shipAddr,
               name: sd.name || cd.name,
+              orderId: createdOrder && createdOrder.id,
+              orderNumber: createdOrder && createdOrder.order_number,
             });
           } catch (e) { console.error("Meta CAPI error", e); }
 
