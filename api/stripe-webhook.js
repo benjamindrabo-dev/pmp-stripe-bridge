@@ -54,15 +54,21 @@ async function kvDel(key) {
 // claim is RELEASED so a Stripe retry can succeed.
 async function kvClaim(key) {
   try {
-    const r = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/set/${encodeURIComponent(key)}/1?NX=true&EX=86400`, {
+    // Canonical Upstash REST form: POST the raw Redis command as a JSON array.
+    // (The path style `?NX=true` is NOT accepted and made every call fail.)
+    const r = await fetch(process.env.UPSTASH_REDIS_REST_URL, {
       method: "POST",
-      headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` },
+      headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify(["SET", key, "1", "NX", "EX", "86400"]),
     });
-    if (!r.ok) return "error";
     const j = await r.json().catch(() => null);
-    if (!j) return "error";
-    return j.result === "OK" ? "ok" : "dup";
-  } catch {
+    if (!r.ok || !j || typeof j !== "object" || "error" in j) {
+      console.error("kvClaim error:", r.status, JSON.stringify(j || {}).slice(0, 200));
+      return "error";
+    }
+    return j.result === "OK" ? "ok" : "dup"; // result null => key already set => duplicate
+  } catch (e) {
+    console.error("kvClaim network error:", String(e && e.message || e));
     return "error";
   }
 }
