@@ -47,16 +47,26 @@ async function kvDel(key) {
   });
 }
 // Atomic claim (SET NX): if Stripe delivers the same webhook twice concurrently,
-// only ONE delivery wins the claim and creates the Shopify order. The old
-// read-then-delete pattern had a race window that could duplicate orders.
+// only ONE delivery wins the claim and creates the Shopify order.
+// Three-state result: "ok" (claimed), "dup" (someone else holds it), "error"
+// (Redis unreachable). An error is NOT a duplicate — the caller returns 5xx so
+// Stripe retries. TTL 24h matches the cart TTL; if order creation fails the
+// claim is RELEASED so a Stripe retry can succeed.
 async function kvClaim(key) {
-  const r = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/set/${encodeURIComponent(key)}/1?NX=true&EX=900`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` },
-  });
-  const j = await r.json().catch(() => ({}));
-  return j.result === "OK";
+  try {
+    const r = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/set/${encodeURIComponent(key)}/1?NX=true&EX=86400`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` },
+    });
+    if (!r.ok) return "error";
+    const j = await r.json().catch(() => null);
+    if (!j) return "error";
+    return j.result === "OK" ? "ok" : "dup";
+  } catch {
+    return "error";
+  }
 }
+async function kvRelease(key) { try { await kvDel(key); } catch (e) { console.error("claim release failed", key); } }
 
 // ---- Meta Conversions API (server-side purchase tracking) ----
 // Deduplicated with the browser pixel: both send event_id = Stripe session id.
@@ -125,14 +135,21 @@ async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart
     `https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${encodeURIComponent(token)}`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
   );
-  const j = await r.json();
-  if (!r.ok) console.error("Meta CAPI failed:", JSON.stringify(j));
-  else console.log("Meta CAPI ok:", JSON.stringify(j));
+  const j = await r.json().catch(() => null);
+  // Explicitly assert Meta acknowledged the event, not just HTTP 200.
+  if (!r.ok || !j || j.events_received !== 1) {
+    console.error("Meta CAPI FAILED for", sessionId, "status:", r.status, "body:", JSON.stringify(j || {}).slice(0, 300));
+  } else {
+    console.log("Meta CAPI ok:", sessionId, JSON.stringify(j));
+  }
 }
 
 function cleanAddress(a) {
   if (!a || !a.address1) return undefined;
   return {
+    // Shopify prefers first_name/last_name; name alone can be ignored.
+    first_name: a.first_name || undefined,
+    last_name: a.last_name || undefined,
     name: a.name || undefined,
     address1: a.address1,
     address2: a.address2 || undefined,
@@ -144,7 +161,7 @@ function cleanAddress(a) {
   };
 }
 
-async function createShopifyOrder({ items, currency, email, phone, shipping, billing, note }) {
+async function createShopifyOrder({ items, currency, email, phone, shipping, billing, note, sessionId }) {
   const order = {
     line_items: items.map((it) => {
       const li = { variant_id: Number(it.variant_id), quantity: Number(it.quantity) };
@@ -156,7 +173,9 @@ async function createShopifyOrder({ items, currency, email, phone, shipping, bil
     financial_status: "paid",
     email: email || undefined,
     phone: phone || undefined,
-    note: `Paid via Stripe (${(currency || "").toUpperCase()}). ${note || ""}`.trim(),
+    note: `Paid via Stripe (${(currency || "").toUpperCase()}). Stripe session: ${sessionId || "n/a"}. ${note || ""}`.trim(),
+    // Machine-readable link back to the Stripe payment (refunds, dedup, audits).
+    note_attributes: sessionId ? [{ name: "stripe_session_id", value: String(sessionId) }] : undefined,
     tags: "stripe",
     send_receipt: true,
     send_fulfillment_receipt: false,
@@ -195,26 +214,60 @@ export default async function handler(req, res) {
   try { event = JSON.parse(raw); } catch { return res.status(400).end(); }
 
   try {
-    if (event.type === "checkout.session.completed") {
+    // async_payment_succeeded covers delayed methods (bank debits etc.) that
+    // confirm after the session completes.
+    if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {
       const session = event.data.object;
       if (session.payment_status === "paid") {
         const key = `sess:${session.id}`;
-        // Idempotency gate BEFORE any side effect (atomic — survives concurrent retries).
-        if (!(await kvClaim(`claim:${session.id}`))) {
+        const claimKey = `claim:${session.id}`;
+
+        // Idempotency gate BEFORE any side effect. Redis error ≠ duplicate:
+        // return 5xx so Stripe retries (it retries failed deliveries for days).
+        const claim = await kvClaim(claimKey);
+        if (claim === "error") return res.status(500).json({ error: "lock unavailable, retry" });
+        if (claim === "dup") {
           console.log("Duplicate webhook delivery ignored for", session.id);
           return res.status(200).json({ received: true, duplicate: true });
         }
-        const cart = await kvGet(key);
-        if (cart) {
-          const cd = session.customer_details || {};
-          const sd = session.shipping_details || {};
-          const shipAddr = sd.address || cd.address || {};
-          const billAddr = cd.address || sd.address || {};
-          const toAddr = (a, name, phone) => ({
-            name, address1: a.line1, address2: a.line2, city: a.city,
+
+        let cart;
+        try { cart = await kvGet(key); }
+        catch (e) { await kvRelease(claimKey); console.error("Upstash read failed", e); return res.status(500).json({ error: "cart read failed, retry" }); }
+
+        if (!cart) {
+          // Cart truly missing (expired >24h or never stored) — retrying won't help.
+          await kvRelease(claimKey);
+          console.error("Cart not found in Upstash for", key);
+          return res.status(200).json({ received: true });
+        }
+
+        const cd = session.customer_details || {};
+        // Newer Stripe API versions move shipping to collected_information.
+        const sd = (session.collected_information && session.collected_information.shipping_details) || session.shipping_details || {};
+        const shipAddr = sd.address || cd.address || {};
+        const billAddr = cd.address || sd.address || {};
+        const toAddr = (a, name, phone) => {
+          const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+          return {
+            first_name: parts.length > 1 ? parts.slice(0, -1).join(" ") : (parts[0] || undefined),
+            last_name: parts.length > 1 ? parts[parts.length - 1] : undefined,
+            name: name || undefined,
+            address1: a.line1, address2: a.line2, city: a.city,
             province: a.state, country: a.country, zip: a.postal_code, phone,
-          });
-          const createdOrder = await createShopifyOrder({
+          };
+        };
+
+        // Integrity tripwire: cart total (what we charge as line items) vs the
+        // amount Stripe actually charged (signed event). Logged, not blocking.
+        const cartTotal = (cart.items || []).reduce((s, it) => s + (Number(it.price_cents) || 0) * (Number(it.quantity) || 1), 0);
+        if (session.amount_total != null && Math.abs(cartTotal - session.amount_total) > Math.max(2, session.amount_total * 0.01)) {
+          console.error(`AMOUNT MISMATCH for ${session.id}: stripe=${session.amount_total} cart=${cartTotal} ${session.currency}`);
+        }
+
+        let createdOrder;
+        try {
+          createdOrder = await createShopifyOrder({
             items: cart.items,
             currency: cart.currency,
             email: cd.email,
@@ -222,32 +275,39 @@ export default async function handler(req, res) {
             shipping: toAddr(shipAddr, sd.name || cd.name, cd.phone),
             billing: toAddr(billAddr, cd.name || sd.name, cd.phone),
             note: cart.note,
+            sessionId: session.id,
           });
-          // Server-side ad tracking (never blocks the order creation).
-          try {
-            await sendMetaPurchase({
-              sessionId: session.id,
-              email: cd.email,
-              phone: cd.phone,
-              value: (Number(session.amount_total) || 0) / 100,
-              currency: session.currency || cart.currency,
-              cart,
-              address: shipAddr,
-              name: sd.name || cd.name,
-              orderId: createdOrder && createdOrder.id,
-              orderNumber: createdOrder && createdOrder.order_number,
-            });
-          } catch (e) { console.error("Meta CAPI error", e); }
-
-          await kvDel(key); // idempotency: only create once
-        } else {
-          console.error("Cart not found in Upstash for", key);
+        } catch (e) {
+          // Release the claim so Stripe's retry can create the order later
+          // (transient Shopify errors recover instead of losing the order).
+          await kvRelease(claimKey);
+          console.error("Shopify order create failed — returning 500 so Stripe retries:", e);
+          return res.status(500).json({ error: "order create failed, retry" });
         }
+
+        // Server-side ad tracking (never blocks the order; pixel is the backup).
+        try {
+          await sendMetaPurchase({
+            sessionId: session.id,
+            email: cd.email,
+            phone: cd.phone,
+            value: (Number(session.amount_total) || 0) / 100,
+            currency: session.currency || cart.currency,
+            cart,
+            address: shipAddr,
+            name: sd.name || cd.name,
+            orderId: createdOrder && createdOrder.id,
+            orderNumber: createdOrder && createdOrder.order_number,
+          });
+        } catch (e) { console.error("Meta CAPI error", e); }
+
+        try { await kvDel(key); } catch (e) { console.error("cart cleanup failed for", key); }
       }
     }
     return res.status(200).json({ received: true });
   } catch (e) {
-    console.error(e);
-    return res.status(200).json({ received: false }); // inspect logs; avoid infinite retries
+    // Unexpected failure: let Stripe retry rather than acknowledging a loss.
+    console.error("Unexpected webhook error:", e);
+    return res.status(500).json({ error: "unexpected error, retry" });
   }
 }

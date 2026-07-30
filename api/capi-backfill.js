@@ -63,6 +63,13 @@ function toEvent(o) {
 
 export default async function handler(req, res) {
   const q = req.query || {};
+  // KILL SWITCH — the one-off catch-up already ran (Jul 21-28 window, 49 events).
+  // Running it again over a live-tracking period would DOUBLE conversions
+  // (its event_id differs from the live cs_… ids). To use it deliberately,
+  // set ENABLE_BACKFILL=1 in Vercel, run, then REMOVE the variable.
+  if (process.env.ENABLE_BACKFILL !== "1") {
+    return res.status(410).json({ error: "Backfill disabled. Set ENABLE_BACKFILL=1 deliberately, then remove it." });
+  }
   if (!process.env.BACKFILL_KEY || q.key !== process.env.BACKFILL_KEY) {
     return res.status(403).json({ error: "Forbidden (set BACKFILL_KEY and pass ?key=)" });
   }
