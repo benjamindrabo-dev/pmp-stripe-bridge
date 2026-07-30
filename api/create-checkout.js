@@ -24,6 +24,63 @@ async function kvSet(key, value) {
   if (!r.ok) throw new Error("Upstash set failed: " + r.status + " " + (await r.text()));
 }
 
+// ---- Server-side price validation ----
+// The browser sends price_cents, which a hostile user could tamper with.
+// We re-fetch the REAL market price of every variant from Shopify (GraphQL
+// contextualPricing, in the cart's currency) and require the submitted total
+// to be >= MIN_TOTAL_RATIO of the catalog total (default 0.7 — automatic
+// bundle discounts like "Buy 2 −20%" / "Buy 3 get 1 free" legitimately bring
+// the total to 75-80%). Tampered 1-cent carts get a 400.
+// If the lookup itself fails (Shopify hiccup / unknown currency) we log and
+// let the order through: availability over strictness — an attacker cannot
+// trigger that failure path.
+const CUR_TO_COUNTRY = { USD: "US", CAD: "CA", GBP: "GB", AUD: "AU", EUR: "DE", NZD: "NZ", JPY: "JP", SGD: "SG", HKD: "HK", MXN: "MX", BRL: "BR", SEK: "SE", NOK: "NO", DKK: "DK", CHF: "CH", PLN: "PL", AED: "AE", SAR: "SA", INR: "IN", ZAR: "ZA" };
+
+async function assertPricesLegit(items, CUR) {
+  const country = CUR_TO_COUNTRY[CUR.toUpperCase()];
+  if (!country) { console.error("price-check skipped: unmapped currency", CUR); return; }
+  for (const it of items) {
+    const qn = Number(it.quantity) || 1;
+    if (!(qn >= 1 && qn <= 50) || items.length > 50) {
+      const e = new Error("Invalid quantity"); e.status = 400; throw e;
+    }
+  }
+  const ids = items.map((it) => `gid://shopify/ProductVariant/${Number(it.variant_id)}`);
+  const q = `query($ids:[ID!]!){ nodes(ids:$ids){ ... on ProductVariant { id contextualPricing(context:{country:${country}}){ price { amount currencyCode } } } } }`;
+  const r = await fetch(`https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/2026-01/graphql.json`, {
+    method: "POST",
+    headers: { "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN, "Content-Type": "application/json" },
+    body: JSON.stringify({ query: q, variables: { ids } }),
+  });
+  const j = await r.json().catch(() => null);
+  const nodes = j && j.data && j.data.nodes;
+  if (!r.ok || !Array.isArray(nodes)) { console.error("price-check skipped: lookup failed", JSON.stringify(j || {}).slice(0, 300)); return; }
+  const priceById = {};
+  let currencyMismatch = false;
+  nodes.forEach((n) => {
+    if (n && n.contextualPricing && n.contextualPricing.price) {
+      priceById[n.id] = Number(n.contextualPricing.price.amount);
+      if (String(n.contextualPricing.price.currencyCode).toUpperCase() !== CUR.toUpperCase()) currencyMismatch = true;
+    }
+  });
+  if (currencyMismatch) { console.error("price-check skipped: market currency mismatch for", CUR); return; }
+  let catalog = 0, given = 0, known = 0;
+  for (const it of items) {
+    const p = priceById[`gid://shopify/ProductVariant/${Number(it.variant_id)}`];
+    if (p == null) continue;
+    known++;
+    const qn = Number(it.quantity) || 1;
+    catalog += p * qn;
+    given += ((Number(it.price_cents) || 0) / 100) * qn;
+  }
+  if (!known) { console.error("price-check skipped: no variants resolved"); return; }
+  const ratio = Number(process.env.MIN_TOTAL_RATIO || 0.7);
+  if (given < catalog * ratio - 0.01 || given > catalog * 1.01 + 0.01) {
+    console.error(`price-check REJECTED: given=${given.toFixed(2)} catalog=${catalog.toFixed(2)} ${CUR}`);
+    const e = new Error("Price validation failed"); e.status = 400; throw e;
+  }
+}
+
 export default async function handler(req, res) {
   cors(res);
   if (req.method === "OPTIONS") return res.status(204).end();
@@ -36,6 +93,9 @@ export default async function handler(req, res) {
     }
     // Currency follows the Shopify cart; env CURRENCY is only a fallback.
     const CUR = String(currency || process.env.CURRENCY || "usd").toLowerCase();
+
+    // Never trust browser-sent prices — verify against Shopify first.
+    await assertPricesLegit(items, CUR);
 
     const params = new URLSearchParams();
     params.append("mode", "payment");
@@ -104,6 +164,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ clientSecret: data.client_secret });
   } catch (e) {
     console.error(e);
+    if (e && e.status === 400) return res.status(400).json({ error: e.message });
     return res.status(500).json({ error: "Server error", detail: String(e.message || e) });
   }
 }

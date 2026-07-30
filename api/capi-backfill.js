@@ -15,7 +15,10 @@
 
 import crypto from "crypto";
 
-const SHOPIFY_API = "2025-01";
+const SHOPIFY_API = "2026-01"; // supported version (2025-01 expired)
+// NOTE: fetches at most 250 orders (one REST page). Fine for a 7-day window at
+// current volume; for bigger windows, run it multiple times with narrower
+// from/to ranges (event_id is stable, so overlaps don't double-count).
 const sha256 = (v) => crypto.createHash("sha256").update(String(v).trim().toLowerCase()).digest("hex");
 
 async function fetchOrders(from, to) {

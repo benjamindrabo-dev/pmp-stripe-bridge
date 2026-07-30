@@ -5,7 +5,7 @@ export const config = { api: { bodyParser: false } };
 
 import crypto from "crypto";
 
-const SHOPIFY_API = "2025-01";
+const SHOPIFY_API = "2026-01"; // keep on a SUPPORTED version (2025-01 expired; expired versions silently fall forward)
 
 function readRaw(req) {
   return new Promise((resolve, reject) => {
@@ -46,6 +46,17 @@ async function kvDel(key) {
     headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` },
   });
 }
+// Atomic claim (SET NX): if Stripe delivers the same webhook twice concurrently,
+// only ONE delivery wins the claim and creates the Shopify order. The old
+// read-then-delete pattern had a race window that could duplicate orders.
+async function kvClaim(key) {
+  const r = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/set/${encodeURIComponent(key)}/1?NX=true&EX=900`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` },
+  });
+  const j = await r.json().catch(() => ({}));
+  return j.result === "OK";
+}
 
 // ---- Meta Conversions API (server-side purchase tracking) ----
 // Deduplicated with the browser pixel: both send event_id = Stripe session id.
@@ -57,7 +68,7 @@ const sha256 = (v) =>
 async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart, address, name, orderId, orderNumber }) {
   const pixelId = process.env.META_PIXEL_ID;
   const token = process.env.META_CAPI_TOKEN;
-  if (!pixelId || !token) return; // not configured yet — skip silently
+  if (!pixelId || !token) { console.error("Meta CAPI SKIPPED: META_PIXEL_ID / META_CAPI_TOKEN not set in Vercel"); return; }
 
   const user_data = {};
   // external_id = a stable, hashed customer identifier. Meta weighs it heavily
@@ -188,6 +199,11 @@ export default async function handler(req, res) {
       const session = event.data.object;
       if (session.payment_status === "paid") {
         const key = `sess:${session.id}`;
+        // Idempotency gate BEFORE any side effect (atomic — survives concurrent retries).
+        if (!(await kvClaim(`claim:${session.id}`))) {
+          console.log("Duplicate webhook delivery ignored for", session.id);
+          return res.status(200).json({ received: true, duplicate: true });
+        }
         const cart = await kvGet(key);
         if (cart) {
           const cd = session.customer_details || {};
