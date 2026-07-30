@@ -125,7 +125,19 @@ export default async function handler(req, res) {
     params.append("locale", "en"); // force English UI (avoid region-based fr-CA)
     // Embedded uses return_url only (no success_url/cancel_url). Stripe sends the
     // shopper here after payment; the webhook creates the Shopify order.
-    params.append("return_url", (process.env.SUCCESS_URL || "https://example.com/thank-you") + "?session_id={CHECKOUT_SESSION_ID}");
+    // The thank-you page must be able to fire ad pixels INSTANTLY, without
+    // waiting for any API call: shoppers often close the tab within seconds and
+    // a pending fetch dies with the page (its callback never runs). So we carry
+    // the amount + currency in the return URL itself. `session-status` is then
+    // only a confirmation, never a dependency.
+    const totalCents =
+      items.reduce((s, it) => s + (Number(it.price_cents) || 0) * (Number(it.quantity) || 1), 0) +
+      Number(process.env.FLAT_SHIPPING_CENTS || 0);
+    params.append(
+      "return_url",
+      (process.env.SUCCESS_URL || "https://example.com/thank-you") +
+        `?session_id={CHECKOUT_SESSION_ID}&v=${totalCents}&c=${CUR.toUpperCase()}`
+    );
     params.append("billing_address_collection", "auto");
     // Worldwide shipping: every country Stripe supports for shipping addresses.
     // (The 4 sanctioned countries CU/IR/KP/SY are omitted, plus RU.) To restrict
