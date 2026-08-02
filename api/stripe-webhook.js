@@ -89,7 +89,12 @@ async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart
   const user_data = {};
   // external_id = a stable, hashed customer identifier. Meta weighs it heavily
   // in Event Match Quality, so we derive it from the email.
-  if (email) user_data.external_id = [sha256(email)];
+  // Send BOTH identifiers: the browser's stable id (identical to the pixel's
+  // Advanced Matching value) and the hashed email. More keys = better matching.
+  const extIds = [];
+  if (cart && cart.external_id) extIds.push(cart.external_id);
+  if (email) extIds.push(sha256(email));
+  if (extIds.length) user_data.external_id = extIds;
   if (email) user_data.em = [sha256(email)];
   if (phone) user_data.ph = [sha256(String(phone).replace(/[^0-9]/g, ""))];
   if (name) {

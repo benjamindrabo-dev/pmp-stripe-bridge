@@ -109,7 +109,7 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    const { items, note, currency, fbp, fbc } = req.body || {};
+    const { items, note, currency, fbp, fbc, external_id } = req.body || {};
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "Empty cart" });
     }
@@ -191,6 +191,9 @@ export default async function handler(req, res) {
       // them to Meta's Conversions API for accurate match quality.
       fbp: fbp || null,
       fbc: fbc || null,
+      // Same stable browser id the pixel uses for Advanced Matching, so the
+      // server event and the browser event describe the SAME person.
+      external_id: (typeof external_id === "string" && external_id.length <= 64) ? external_id : null,
       ua: req.headers["user-agent"] || null,
       ip: String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || null,
     });
