@@ -139,6 +139,14 @@ export default async function handler(req, res) {
         `?session_id={CHECKOUT_SESSION_ID}&v=${totalCents}&c=${CUR.toUpperCase()}`
     );
     params.append("billing_address_collection", "auto");
+    // Promo codes. Shopify's own discount CODES are unreachable now (they only
+    // apply in the native checkout we bypass), so codes are created in Stripe:
+    // Dashboard → Product catalogue → Coupons → Promotion codes. Stripe enforces
+    // the rules itself (percent/amount, expiry, max redemptions, minimum order,
+    // first-time customer), and the webhook writes the discount onto the Shopify
+    // order so the books match. Shopify AUTOMATIC discounts (Bundle & Save) are
+    // unaffected — they are already baked into the line prices we send.
+    params.append("allow_promotion_codes", "true");
     // Worldwide shipping: every country Stripe supports for shipping addresses.
     // (The 4 sanctioned countries CU/IR/KP/SY are omitted, plus RU.) To restrict
     // where you sell, trim this list (e.g. keep only "CA US GB ...").

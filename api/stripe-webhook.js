@@ -172,7 +172,30 @@ function cleanAddress(a) {
   };
 }
 
-async function createShopifyOrder({ items, currency, email, phone, shipping, billing, note, sessionId }) {
+// Read the promo code the shopper typed inside Stripe Checkout. The webhook
+// payload only carries discount IDs, so we re-fetch the session with the
+// promotion code expanded. Never throws — a missing code must not cost an order.
+async function fetchDiscount(sessionId) {
+  try {
+    const r = await fetch(
+      `https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(sessionId)}?expand[]=discounts.promotion_code`,
+      { headers: { Authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}` } }
+    );
+    const s = await r.json();
+    if (!r.ok) return null;
+    const cents = Number(s.total_details && s.total_details.amount_discount) || 0;
+    if (cents <= 0) return null;
+    const d = (s.discounts || [])[0];
+    const pc = d && d.promotion_code;
+    const code = (pc && (pc.code || pc.id)) || "STRIPE_PROMO";
+    return { code: String(code), cents };
+  } catch (e) {
+    console.error("promo lookup failed:", String((e && e.message) || e));
+    return null;
+  }
+}
+
+async function createShopifyOrder({ items, currency, email, phone, shipping, billing, note, sessionId, discount }) {
   const order = {
     line_items: items.map((it) => {
       const li = { variant_id: Number(it.variant_id), quantity: Number(it.quantity) };
@@ -193,6 +216,16 @@ async function createShopifyOrder({ items, currency, email, phone, shipping, bil
     inventory_behaviour: "decrement_obeying_policy",
   };
   if (currency) order.currency = String(currency).toUpperCase();
+  // Promo code applied inside Stripe Checkout. Recorded as an order-level
+  // discount so the Shopify total equals what Stripe actually charged, and so
+  // the code shows up in Shopify's reports (which code drove which sale).
+  if (discount && discount.cents > 0) {
+    order.discount_codes = [{
+      code: discount.code,
+      amount: (discount.cents / 100).toFixed(2),
+      type: "fixed_amount",
+    }];
+  }
   const ship = cleanAddress(shipping);
   const bill = cleanAddress(billing);
   if (ship) order.shipping_address = ship;
@@ -269,11 +302,15 @@ export default async function handler(req, res) {
           };
         };
 
-        // Integrity tripwire: cart total (what we charge as line items) vs the
+        // Promo code entered inside Stripe Checkout (null when there is none).
+        const discount = await fetchDiscount(session.id);
+
+        // Integrity tripwire: cart total MINUS the Stripe promo discount, vs the
         // amount Stripe actually charged (signed event). Logged, not blocking.
         const cartTotal = (cart.items || []).reduce((s, it) => s + (Number(it.price_cents) || 0) * (Number(it.quantity) || 1), 0);
-        if (session.amount_total != null && Math.abs(cartTotal - session.amount_total) > Math.max(2, session.amount_total * 0.01)) {
-          console.error(`AMOUNT MISMATCH for ${session.id}: stripe=${session.amount_total} cart=${cartTotal} ${session.currency}`);
+        const expected = cartTotal - ((discount && discount.cents) || 0);
+        if (session.amount_total != null && Math.abs(expected - session.amount_total) > Math.max(2, session.amount_total * 0.01)) {
+          console.error(`AMOUNT MISMATCH for ${session.id}: stripe=${session.amount_total} cart=${cartTotal} discount=${(discount && discount.cents) || 0} ${session.currency}`);
         }
 
         let createdOrder;
@@ -287,7 +324,17 @@ export default async function handler(req, res) {
             billing: toAddr(billAddr, cd.name || sd.name, cd.phone),
             note: cart.note,
             sessionId: session.id,
+            discount,
           });
+          // Money check: if Shopify ever ignores order.discount_codes, the order
+          // total would silently exceed the amount charged. Surface it loudly in
+          // the logs rather than let the books drift.
+          if (discount && createdOrder && session.amount_total != null) {
+            const orderCents = Math.round(Number(createdOrder.total_price) * 100);
+            if (Math.abs(orderCents - session.amount_total) > 2) {
+              console.error(`DISCOUNT NOT APPLIED on order ${createdOrder.id}: shopify=${orderCents} stripe=${session.amount_total} code=${discount.code}`);
+            }
+          }
         } catch (e) {
           // Release the claim so Stripe's retry can create the order later
           // (transient Shopify errors recover instead of losing the order).
