@@ -1,15 +1,12 @@
-// Temporary preview-only test. It verifies that a paid Stripe session produces
-// privacy-safe Google enhanced-conversion identifiers without returning them.
+// Temporary preview-only test. It verifies that a known paid Stripe session
+// produces privacy-safe Google enhanced-conversion identifiers without returning
+// the identifiers or any raw customer data.
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store, private");
   if (process.env.VERCEL_ENV !== "preview") return res.status(404).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
-  const sessionId = String(req.query && req.query.session_id || "");
-  if (!/^cs_live_[A-Za-z0-9_]+$/.test(sessionId)) {
-    return res.status(400).json({ error: "Bad session_id" });
-  }
-
+  const sessionId = "cs_live_b1zeEjFXODl3doJ32qvqIkBTLIA2ChkWfDyyUESMwQsGALoeixhFDcAWNM";
   const origin = process.env.STORE_ORIGIN || "https://www.puremajestypet.com";
   const host = process.env.VERCEL_URL;
   const response = await fetch(`https://${host}/api/session-status?session_id=${encodeURIComponent(sessionId)}`, {
