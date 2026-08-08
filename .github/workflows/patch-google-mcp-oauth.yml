@@ -70,7 +70,7 @@ jobs:
 
           text, count = re.subn(
               r"const verifyToken = async[\s\S]*?export \{ authHandler as GET, authHandler as POST, authHandler as DELETE \};\s*$",
-              replacement + "\n",
+              lambda _match: replacement + "\n",
               text,
               count=1,
           )
