@@ -1,12 +1,12 @@
 import { createMcpHandler, withMcpAuth } from 'mcp-handler';
 import { z } from 'zod';
-import { MCP_SCOPES, verifySignedToken } from '../lib/mcp-oauth.js';
+import { MCP_NON_SECRET_DEFAULTS, MCP_SCOPES, verifySignedToken } from '../lib/mcp-oauth.js';
 
 const GOOGLE_ADS_API_VERSION = 'v25';
 const GOOGLE_ADS_BASE = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}`;
-const DEFAULT_CUSTOMER_ID = (process.env.GOOGLE_ADS_CUSTOMER_ID || '2096373623').replace(/\D/g, '');
-const LOGIN_CUSTOMER_ID = (process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '5890800084').replace(/\D/g, '');
-const DEFAULT_GA4_PROPERTY_ID = (process.env.GA4_PROPERTY_ID || '526354130').replace(/\D/g, '');
+const DEFAULT_CUSTOMER_ID = (process.env.GOOGLE_ADS_CUSTOMER_ID || MCP_NON_SECRET_DEFAULTS.GOOGLE_ADS_CUSTOMER_ID).replace(/\D/g, '');
+const LOGIN_CUSTOMER_ID = (process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || MCP_NON_SECRET_DEFAULTS.GOOGLE_ADS_LOGIN_CUSTOMER_ID).replace(/\D/g, '');
+const DEFAULT_GA4_PROPERTY_ID = (process.env.GA4_PROPERTY_ID || MCP_NON_SECRET_DEFAULTS.GA4_PROPERTY_ID).replace(/\D/g, '');
 
 function requiredEnv(name) {
   const value = process.env[name];
@@ -20,7 +20,7 @@ function normalizeCustomerId(value) {
 
 async function googleAccessToken() {
   const body = new URLSearchParams({
-    client_id: requiredEnv('GOOGLE_CLIENT_ID'),
+    client_id: process.env.GOOGLE_CLIENT_ID || MCP_NON_SECRET_DEFAULTS.GOOGLE_CLIENT_ID,
     client_secret: requiredEnv('GOOGLE_CLIENT_SECRET'),
     refresh_token: requiredEnv('GOOGLE_REFRESH_TOKEN'),
     grant_type: 'refresh_token',
