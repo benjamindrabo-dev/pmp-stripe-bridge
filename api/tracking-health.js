@@ -18,12 +18,18 @@ export default function handler(req, res) {
 
   return res.status(200).json({
     ok: Object.values(required).every(Boolean),
-    tracking_version: "pmp_v2",
+    tracking_version: "pmp_v3_google",
     environment: process.env.VERCEL_ENV || null,
     deployment_commit: process.env.VERCEL_GIT_COMMIT_SHA || null,
     meta: {
       pixel_id: pixelId || null,
       capi_token_configured: required.meta_capi_token,
+    },
+    google_ads: {
+      conversion_id: "AW-18031615333",
+      conversion_label: "jlQICMeV844cEOW6kpZD",
+      enhanced_conversion_user_data: "sha256_email_and_optional_phone",
+      server_api_upload: false,
     },
     stripe: {
       mode: stripeKey.startsWith("sk_live_") ? "live" : stripeKey.startsWith("sk_test_") ? "test" : stripeKey ? "configured" : "missing",
