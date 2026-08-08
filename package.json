@@ -2,11 +2,16 @@
   "name": "square-shopify-bridge",
   "version": "1.0.0",
   "private": true,
-  "description": "Custom Pay-with-Square checkout bridge for Shopify (Vercel serverless).",
+  "description": "Custom Stripe checkout bridge for Shopify with Google Ads + GA4 MCP tools on Vercel.",
   "type": "module",
   "engines": { "node": ">=18" },
   "scripts": {
     "dev": "vercel dev",
     "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "mcp-handler": "latest",
+    "@modelcontextprotocol/sdk": "^1.26.0",
+    "zod": "^3.25.0"
   }
 }
