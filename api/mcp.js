@@ -1,8 +1,8 @@
 import { createMcpHandler, withMcpAuth } from 'mcp-handler';
 import { z } from 'zod';
-import crypto from 'node:crypto';
+import { MCP_SCOPES, verifySignedToken } from '../lib/mcp-oauth.js';
 
-const GOOGLE_ADS_API_VERSION = 'v24';
+const GOOGLE_ADS_API_VERSION = 'v25';
 const GOOGLE_ADS_BASE = `https://googleads.googleapis.com/${GOOGLE_ADS_API_VERSION}`;
 const DEFAULT_CUSTOMER_ID = (process.env.GOOGLE_ADS_CUSTOMER_ID || '2096373623').replace(/\D/g, '');
 const LOGIN_CUSTOMER_ID = (process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || '5890800084').replace(/\D/g, '');
@@ -281,6 +281,7 @@ const handler = createMcpHandler(
             status: 'PAUSED',
             advertisingChannelType: 'SEARCH',
             campaignBudget: budgetResource,
+            containsEuPoliticalAdvertising: 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING',
             manualCpc: {},
             networkSettings: { targetGoogleSearch: true, targetSearchNetwork: false, targetContentNetwork: false, targetPartnerSearchNetwork: false },
           } }],
@@ -330,19 +331,32 @@ const handler = createMcpHandler(
   { basePath: '/api' },
 );
 
-const verifyToken = async (_req, bearerToken) => {
-  const expected = process.env.MCP_AUTH_TOKEN;
-  if (!expected || !bearerToken) return undefined;
-  const a = Buffer.from(String(expected));
-  const b = Buffer.from(String(bearerToken));
-  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return undefined;
-  return {
-    token: bearerToken,
-    scopes: ['google-ads:read', 'google-ads:write', 'ga4:read'],
-    clientId: 'chatgpt-work',
-  };
+const verifyToken = async (_request, bearerToken) => {
+  if (!bearerToken) return undefined;
+  try {
+    const payload = verifySignedToken(bearerToken, 'access');
+    const scopes = String(payload.scope || '')
+      .split(/\s+/)
+      .filter((scope) => MCP_SCOPES.includes(scope));
+    if (!payload.client_id || !scopes.length) return undefined;
+    return {
+      token: bearerToken,
+      scopes,
+      clientId: String(payload.client_id),
+      extra: {
+        subject: payload.sub || 'pure-majesty-owner',
+        audience: payload.aud || null,
+      },
+    };
+  } catch {
+    return undefined;
+  }
 };
 
-const authHandler = withMcpAuth(handler, verifyToken, { required: true });
+const authHandler = withMcpAuth(handler, verifyToken, {
+  required: true,
+  requiredScopes: MCP_SCOPES,
+  resourceMetadataPath: '/.well-known/oauth-protected-resource',
+});
 
 export { authHandler as GET, authHandler as POST, authHandler as DELETE };
