@@ -5,9 +5,10 @@
 // the amount, currency, paid flag and email are returned.
 
 function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", process.env.STORE_ORIGIN || "*");
+  res.setHeader("Access-Control-Allow-Origin", process.env.STORE_ORIGIN || "https://puremajestypet.com");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Cache-Control", "no-store, private");
 }
 
 export default async function handler(req, res) {
@@ -31,7 +32,6 @@ export default async function handler(req, res) {
       paid: s.payment_status === "paid",                 // only fire events when true
       amount: s.amount_total,                            // in the smallest currency unit (cents)
       currency: String(s.currency || "").toUpperCase(),  // e.g. "USD", "GBP", "CAD"
-      email: (s.customer_details && s.customer_details.email) || null,
     });
   } catch (e) {
     console.error(e);
