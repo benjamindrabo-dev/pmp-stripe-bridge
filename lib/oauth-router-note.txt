@@ -1,0 +1,1 @@
+Consolidation marker: OAuth handlers are bundled through api/oauth.js to remain within the Vercel Hobby serverless-function limit.
