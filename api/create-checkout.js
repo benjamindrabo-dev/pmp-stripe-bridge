@@ -16,12 +16,47 @@ function cors(res) {
 
 // Upstash Redis REST — now checks the response so a bad token fails loudly.
 async function kvSet(key, value) {
-  const r = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/set/${encodeURIComponent(key)}?EX=86400`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` },
-    body: JSON.stringify(value),
-  });
-  if (!r.ok) throw new Error("Upstash set failed: " + r.status + " " + (await r.text()));
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const r = await fetch(`${process.env.UPSTASH_REDIS_REST_URL}/set/${encodeURIComponent(key)}?EX=2592000`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${process.env.UPSTASH_REDIS_REST_TOKEN}` },
+        body: JSON.stringify(value),
+      });
+      if (r.ok) return;
+      lastError = new Error("Upstash set failed: " + r.status + " " + (await r.text()));
+    } catch (e) {
+      lastError = e;
+    }
+    // Short retries cover transient Redis/network failures without keeping the
+    // shopper waiting for several seconds. We never continue without the cart:
+    // the webhook needs it to create the matching Shopify order after payment.
+    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 120));
+  }
+  throw lastError || new Error("Upstash set failed");
+}
+
+async function createStripeSession(params) {
+  const post = async (body) => {
+    const response = await fetch("https://api.stripe.com/v1/checkout/sessions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`,
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: body.toString(),
+    });
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      data = { error: { message: "Invalid response from Stripe" } };
+    }
+    return { response, data };
+  };
+
+  return post(params);
 }
 
 // ---- Server-side price validation (FAIL-CLOSED) ----
@@ -39,6 +74,28 @@ const MARKET_COUNTRY = { USD: "US", CAD: "CA", GBP: "GB", AUD: "AU", EUR: "DE", 
 const ALLOWED_CURRENCIES = String(process.env.ALLOWED_CURRENCIES || "USD CAD GBP AUD EUR NZD").trim().split(/\s+/);
 
 function reject(msg) { const e = new Error(msg); e.status = 400; return e; }
+
+function safeText(value, max = 500) {
+  if (typeof value !== "string") return null;
+  const clean = value.trim().replace(/[\u0000-\u001F\u007F]/g, "");
+  return clean ? clean.slice(0, max) : null;
+}
+
+function safePageUrl(value) {
+  const clean = safeText(value, 800);
+  if (!clean) return null;
+  try {
+    const u = new URL(clean);
+    if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+    u.username = "";
+    u.password = "";
+    u.hash = "";
+    u.search = "";
+    return (u.origin + u.pathname).slice(0, 500);
+  } catch {
+    return null;
+  }
+}
 
 function minRatioForUnits(units) {
   if (units >= 4) return 0.73; // Buy 3 get 1 free = 0.75 legit
@@ -109,7 +166,12 @@ export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
   try {
-    const { items, note, currency, fbp, fbc, external_id } = req.body || {};
+    const {
+      items, note, currency, fbp, fbc, external_id,
+      landing_url, referrer,
+      utm_source, utm_medium, utm_campaign, utm_content, utm_term,
+      gclid, gbraid, wbraid, ttclid, msclkid,
+    } = req.body || {};
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "Empty cart" });
     }
@@ -123,20 +185,16 @@ export default async function handler(req, res) {
     params.append("mode", "payment");
     params.append("ui_mode", "embedded"); // classic Embedded Checkout (works on all API versions; "embedded_page" needs API 2026-03-25.dahlia)
     params.append("locale", "en"); // force English UI (avoid region-based fr-CA)
+    // Do not send payment_method_types. For Checkout Sessions, omission lets
+    // Stripe select the methods enabled in the Dashboard and eligible for this
+    // shopper/currency. We deliberately do not send automatic_payment_methods:
+    // older Checkout API versions can reject that PaymentIntent-style parameter.
     // Embedded uses return_url only (no success_url/cancel_url). Stripe sends the
     // shopper here after payment; the webhook creates the Shopify order.
-    // The thank-you page must be able to fire ad pixels INSTANTLY, without
-    // waiting for any API call: shoppers often close the tab within seconds and
-    // a pending fetch dies with the page (its callback never runs). So we carry
-    // the amount + currency in the return URL itself. `session-status` is then
-    // only a confirmation, never a dependency.
-    const totalCents =
-      items.reduce((s, it) => s + (Number(it.price_cents) || 0) * (Number(it.quantity) || 1), 0) +
-      Number(process.env.FLAT_SHIPPING_CENTS || 0);
+    const returnBase = process.env.SUCCESS_URL || "https://example.com/thank-you";
     params.append(
       "return_url",
-      (process.env.SUCCESS_URL || "https://example.com/thank-you") +
-        `?session_id={CHECKOUT_SESSION_ID}&v=${totalCents}&c=${CUR.toUpperCase()}`
+      returnBase + (returnBase.includes("?") ? "&" : "?") + "session_id={CHECKOUT_SESSION_ID}"
     );
     params.append("billing_address_collection", "auto");
     // Promo codes. Shopify's own discount CODES are unreachable now (they only
@@ -147,6 +205,35 @@ export default async function handler(req, res) {
     // order so the books match. Shopify AUTOMATIC discounts (Bundle & Save) are
     // unaffected — they are already baked into the line prices we send.
     params.append("allow_promotion_codes", "true");
+
+    // Attribution is stored on the Stripe Session as operational metadata, so
+    // every payment attempt can be reconciled in Stripe even if the browser
+    // closes before the thank-you page. Values are sanitized and size-limited.
+    const attribution = {
+      tracking_version: "pmp_v2",
+      // Stable pseudonymous person key: several Checkout Sessions created by
+      // the same browser can be counted as one person without card data/PII.
+      person_id: safeText(external_id, 64),
+      browser_id: safeText(external_id, 64),
+      fbp: safeText(fbp, 255),
+      fbc: safeText(fbc, 255),
+      landing_page: safePageUrl(landing_url),
+      referrer: safePageUrl(referrer),
+      utm_source: safeText(utm_source, 100),
+      utm_medium: safeText(utm_medium, 100),
+      utm_campaign: safeText(utm_campaign, 200),
+      utm_content: safeText(utm_content, 200),
+      utm_term: safeText(utm_term, 200),
+      gclid: safeText(gclid, 255),
+      gbraid: safeText(gbraid, 255),
+      wbraid: safeText(wbraid, 255),
+      ttclid: safeText(ttclid, 255),
+      msclkid: safeText(msclkid, 255),
+    };
+    Object.entries(attribution).forEach(([key, value]) => {
+      if (value) params.append(`metadata[${key}]`, value);
+    });
+    if (attribution.browser_id) params.append("client_reference_id", attribution.browser_id);
     // Worldwide shipping: every country Stripe supports for shipping addresses.
     // (The 4 sanctioned countries CU/IR/KP/SY are omitted, plus RU.) To restrict
     // where you sell, trim this list (e.g. keep only "CA US GB ...").
@@ -156,6 +243,9 @@ export default async function handler(req, res) {
     items.forEach((it, i) => {
       params.append(`line_items[${i}][price_data][currency]`, CUR);
       params.append(`line_items[${i}][price_data][product_data][name]`, String(it.title || "Item").slice(0, 250));
+      // Recovery data: if Redis is unavailable much later when a delayed payment
+      // settles, the webhook can rebuild the Shopify line from Stripe itself.
+      params.append(`line_items[${i}][price_data][product_data][metadata][shopify_variant_id]`, String(Number(it.variant_id)));
       params.append(`line_items[${i}][price_data][unit_amount]`, String(Number(it.price_cents)));
       params.append(`line_items[${i}][quantity]`, String(Number(it.quantity) || 1));
       // Product image (shown on the Stripe Checkout page, like Shopify does).
@@ -175,15 +265,9 @@ export default async function handler(req, res) {
       params.append(`line_items[${i}][quantity]`, "1");
     }
 
-    const r = await fetch("https://api.stripe.com/v1/checkout/sessions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}`,
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: params.toString(),
-    });
-    const data = await r.json();
+    const stripeResult = await createStripeSession(params);
+    const r = stripeResult.response;
+    const data = stripeResult.data;
     if (!r.ok) {
       console.error("Stripe error", data);
       return res.status(502).json({ error: "Stripe create session failed", detail: data.error });
@@ -197,16 +281,28 @@ export default async function handler(req, res) {
       note: note || "",
       // Ad-attribution signals captured at checkout time; the webhook forwards
       // them to Meta's Conversions API for accurate match quality.
-      fbp: fbp || null,
-      fbc: fbc || null,
+      fbp: attribution.fbp,
+      fbc: attribution.fbc,
       // Same stable browser id the pixel uses for Advanced Matching, so the
       // server event and the browser event describe the SAME person.
-      external_id: (typeof external_id === "string" && external_id.length <= 64) ? external_id : null,
+      external_id: attribution.browser_id,
+      landing_url: attribution.landing_page,
+      referrer: attribution.referrer,
+      utm_source: attribution.utm_source,
+      utm_medium: attribution.utm_medium,
+      utm_campaign: attribution.utm_campaign,
+      utm_content: attribution.utm_content,
+      utm_term: attribution.utm_term,
+      gclid: attribution.gclid,
+      gbraid: attribution.gbraid,
+      wbraid: attribution.wbraid,
+      ttclid: attribution.ttclid,
+      msclkid: attribution.msclkid,
       ua: req.headers["user-agent"] || null,
       ip: String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || null,
     });
 
-    return res.status(200).json({ clientSecret: data.client_secret });
+    return res.status(200).json({ clientSecret: data.client_secret, sessionId: data.id });
   } catch (e) {
     console.error(e);
     if (e && e.status === 400) return res.status(400).json({ error: e.message });

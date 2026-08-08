@@ -38,6 +38,7 @@ function toEvent(o) {
   const a = o.shipping_address || o.billing_address || {};
   const user_data = {};
   if (o.email) user_data.em = [sha256(o.email)];
+  if (o.email) user_data.external_id = [sha256(o.email)];
   if (o.phone || a.phone) user_data.ph = [sha256(String(o.phone || a.phone).replace(/[^0-9]/g, ""))];
   if (a.first_name) user_data.fn = [sha256(a.first_name)];
   if (a.last_name) user_data.ln = [sha256(a.last_name)];
@@ -51,12 +52,20 @@ function toEvent(o) {
     event_time: Math.floor(new Date(o.created_at).getTime() / 1000),
     event_id: "shopify_" + o.id, // stable → safe to re-run the same window
     action_source: "website",
-    event_source_url: process.env.SUCCESS_URL || undefined,
+    event_source_url: o.landing_site || process.env.SUCCESS_URL || undefined,
     user_data,
     custom_data: {
       value: Number(o.total_price),
       currency: String(o.currency || "USD").toUpperCase(),
       order_id: String(o.order_number || o.id),
+      content_type: "product",
+      num_items: (o.line_items || []).reduce((n, item) => n + (Number(item.quantity) || 1), 0),
+      content_ids: (o.line_items || []).map((item) => String(item.variant_id || item.product_id)),
+      contents: (o.line_items || []).map((item) => ({
+        id: String(item.variant_id || item.product_id),
+        quantity: Number(item.quantity) || 1,
+        item_price: Number(item.price) || 0,
+      })),
     },
   };
 }
