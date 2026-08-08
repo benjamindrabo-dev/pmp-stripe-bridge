@@ -1,0 +1,107 @@
+name: Patch Google MCP OAuth
+
+on:
+  push:
+    paths:
+      - ".github/workflows/patch-google-mcp-oauth.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Patch MCP authentication and Google Ads API version
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('api/mcp.js')
+          text = path.read_text()
+
+          text = text.replace(
+              "import { z } from 'zod';\nimport crypto from 'node:crypto';",
+              "import { z } from 'zod';\nimport { MCP_SCOPES, verifySignedToken } from '../lib/mcp-oauth.js';",
+          )
+          text = text.replace(
+              "const GOOGLE_ADS_API_VERSION = 'v24';",
+              "const GOOGLE_ADS_API_VERSION = 'v25';",
+          )
+          text = text.replace(
+              "campaignBudget: budgetResource,\n            manualCpc: {},",
+              "campaignBudget: budgetResource,\n            containsEuPoliticalAdvertising: 'DOES_NOT_CONTAIN_EU_POLITICAL_ADVERTISING',\n            manualCpc: {},",
+          )
+
+          replacement = r'''const verifyToken = async (_request, bearerToken) => {
+            if (!bearerToken) return undefined;
+            try {
+              const payload = verifySignedToken(bearerToken, 'access');
+              const scopes = String(payload.scope || '')
+                .split(/\s+/)
+                .filter((scope) => MCP_SCOPES.includes(scope));
+              if (!payload.client_id || !scopes.length) return undefined;
+              return {
+                token: bearerToken,
+                scopes,
+                clientId: String(payload.client_id),
+                extra: {
+                  subject: payload.sub || 'pure-majesty-owner',
+                  audience: payload.aud || null,
+                },
+              };
+            } catch {
+              return undefined;
+            }
+          };
+
+          const authHandler = withMcpAuth(handler, verifyToken, {
+            required: true,
+            requiredScopes: MCP_SCOPES,
+            resourceMetadataPath: '/.well-known/oauth-protected-resource',
+          });
+
+          export { authHandler as GET, authHandler as POST, authHandler as DELETE };'''
+
+          text, count = re.subn(
+              r"const verifyToken = async[\s\S]*?export \{ authHandler as GET, authHandler as POST, authHandler as DELETE \};\s*$",
+              replacement + "\n",
+              text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit('Could not find the existing MCP authentication block.')
+
+          required_fragments = [
+              "GOOGLE_ADS_API_VERSION = 'v25'",
+              "verifySignedToken(bearerToken, 'access')",
+              "requiredScopes: MCP_SCOPES",
+              "containsEuPoliticalAdvertising",
+          ]
+          missing = [fragment for fragment in required_fragments if fragment not in text]
+          if missing:
+              raise SystemExit(f'Missing expected patched fragments: {missing}')
+
+          path.write_text(text)
+          PY
+
+      - name: Syntax check
+        run: node --check api/mcp.js && node --check lib/mcp-oauth.js
+
+      - name: Commit patched MCP
+        shell: bash
+        run: |
+          if git diff --quiet -- api/mcp.js; then
+            echo "No MCP patch was needed."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add api/mcp.js
+          git commit -m "Secure Google Ads MCP with OAuth and enable write tools"
+          git push
