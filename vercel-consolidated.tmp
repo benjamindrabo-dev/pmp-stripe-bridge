@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "rewrites": [
+    { "source": "/.well-known/oauth-protected-resource", "destination": "/api/oauth?route=protected-resource" },
+    { "source": "/.well-known/oauth-authorization-server", "destination": "/api/oauth?route=authorization-server" },
+    { "source": "/oauth/authorize", "destination": "/api/oauth?route=authorize" },
+    { "source": "/oauth/token", "destination": "/api/oauth?route=token" },
+    { "source": "/api/mcp-health", "destination": "/api/oauth?route=health" }
+  ],
+  "functions": {
+    "api/mcp.js": { "maxDuration": 60 }
+  }
+}
