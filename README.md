@@ -44,3 +44,5 @@ Shopify order (paid, inventory decremented) <── /api/stripe-webhook <── 
 Stripe is more risk-averse than high-risk acquirers. Shopify Payments **is** Stripe under the hood — the same 4.48% chargeback rate that got you removed can get a direct Stripe account frozen too. This buys time; clearing the 186 unfulfilled orders and refunding the oldest is what actually protects any processor you use.
 ```
 ```
+
+<!-- redeploy marker: 2026-08-08 google-mcp-env -->
