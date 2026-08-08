@@ -1,4 +1,4 @@
-name: Embed Known Google MCP Configuration
+name: Apply Primary Google Ads Account
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Embed known non-secret configuration
+      - name: Apply known non-secret configuration
         run: python3 scripts/embed-known-config.py
 
       - name: Syntax check
@@ -24,15 +24,15 @@ jobs:
           node --check lib/mcp-oauth.js
           node --check lib/mcp-health.js
 
-      - name: Commit known configuration defaults
+      - name: Commit primary Google Ads account
         shell: bash
         run: |
           if git diff --quiet -- api/mcp.js lib/mcp-oauth.js lib/mcp-health.js; then
-            echo "Known non-secret defaults are already embedded."
+            echo "Primary Google Ads account is already configured."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add api/mcp.js lib/mcp-oauth.js lib/mcp-health.js
-          git commit -m "Embed known non-secret Google MCP configuration"
+          git commit -m "Use Google Ads account 6591205737 as primary"
           git push
