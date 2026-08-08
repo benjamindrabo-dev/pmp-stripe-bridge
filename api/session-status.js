@@ -1,18 +1,65 @@
 // GET /api/session-status?session_id=cs_xxx
-// Read-only helper for the thank-you page: returns the REAL paid amount +
-// currency from the Stripe Checkout Session so the storefront can fire ad
-// conversion events (Meta / Google / TikTok "Purchase"). No secrets leak — only
-// the amount, currency, paid flag and email are returned.
+// Read-only helper for the custom thank-you page. It returns the signed Stripe
+// payment state, amount and currency so browser ad tags only fire after payment.
+// For requests coming from the configured storefront, it can also return
+// normalized SHA-256 identifiers for Google Ads enhanced conversions. Raw
+// customer identifiers are never returned.
 
-function cors(res) {
-  res.setHeader("Access-Control-Allow-Origin", process.env.STORE_ORIGIN || "https://puremajestypet.com");
+import crypto from "crypto";
+
+function cors(req, res) {
+  const configuredOrigin = process.env.STORE_ORIGIN || "https://www.puremajestypet.com";
+  const requestOrigin = String(req.headers.origin || "");
+  if (requestOrigin === configuredOrigin) {
+    res.setHeader("Access-Control-Allow-Origin", configuredOrigin);
+    res.setHeader("Vary", "Origin");
+  }
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   res.setHeader("Cache-Control", "no-store, private");
 }
 
+function requestIsFromStore(req) {
+  const configuredOrigin = process.env.STORE_ORIGIN || "https://www.puremajestypet.com";
+  const origin = String(req.headers.origin || "");
+  const referer = String(req.headers.referer || "");
+  return origin === configuredOrigin || referer === configuredOrigin || referer.startsWith(configuredOrigin + "/");
+}
+
+function sha256(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function normalizeEmail(value) {
+  const clean = String(value || "").trim().toLowerCase().replace(/\s+/g, "");
+  const at = clean.lastIndexOf("@");
+  if (at <= 0 || at === clean.length - 1) return null;
+  let local = clean.slice(0, at);
+  const domain = clean.slice(at + 1);
+  if (domain === "gmail.com" || domain === "googlemail.com") local = local.replace(/\./g, "");
+  return local && domain ? `${local}@${domain}` : null;
+}
+
+function normalizePhone(value) {
+  const raw = String(value || "").trim();
+  if (!raw.startsWith("+")) return null;
+  const digits = raw.replace(/\D/g, "");
+  if (digits.length < 10 || digits.length > 15) return null;
+  return `+${digits}`;
+}
+
+function googleUserData(session) {
+  const details = session && session.customer_details || {};
+  const data = {};
+  const email = normalizeEmail(details.email || session.customer_email);
+  const phone = normalizePhone(details.phone);
+  if (email) data.sha256_email_address = sha256(email);
+  if (phone) data.sha256_phone_number = sha256(phone);
+  return Object.keys(data).length ? data : null;
+}
+
 export default async function handler(req, res) {
-  cors(res);
+  cors(req, res);
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
@@ -20,21 +67,31 @@ export default async function handler(req, res) {
   if (!/^cs_[A-Za-z0-9_]+$/.test(id)) return res.status(400).json({ error: "Bad session_id" });
 
   try {
-    const r = await fetch("https://api.stripe.com/v1/checkout/sessions/" + encodeURIComponent(id), {
+    const response = await fetch("https://api.stripe.com/v1/checkout/sessions/" + encodeURIComponent(id), {
       headers: { Authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}` },
     });
-    const s = await r.json();
-    if (!r.ok) {
-      return res.status(502).json({ error: "Stripe retrieve failed", detail: s.error });
+    const session = await response.json();
+    if (!response.ok) {
+      return res.status(502).json({ error: "Stripe retrieve failed", detail: session.error });
     }
-    return res.status(200).json({
-      status: s.status,                                  // "complete" | "open" | "expired"
-      paid: s.payment_status === "paid",                 // only fire events when true
-      amount: s.amount_total,                            // in the smallest currency unit (cents)
-      currency: String(s.currency || "").toUpperCase(),  // e.g. "USD", "GBP", "CAD"
-    });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: "Server error", detail: String(e.message || e) });
+
+    const paid = session.payment_status === "paid";
+    const payload = {
+      status: session.status,
+      paid,
+      amount: session.amount_total,
+      currency: String(session.currency || "").toUpperCase(),
+      sessionId: session.id,
+    };
+
+    if (paid && requestIsFromStore(req)) {
+      const userData = googleUserData(session);
+      if (userData) payload.google_user_data = userData;
+    }
+
+    return res.status(200).json(payload);
+  } catch (error) {
+    console.error(error);
+    return res.status(500).json({ error: "Server error", detail: String(error.message || error) });
   }
 }
