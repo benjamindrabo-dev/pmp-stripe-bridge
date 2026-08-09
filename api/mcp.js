@@ -44,7 +44,6 @@ async function googleAdsFetch(path, body) {
     'developer-token': requiredEnv('GOOGLE_ADS_DEVELOPER_TOKEN'),
     'content-type': 'application/json',
   };
-  if (LOGIN_CUSTOMER_ID) headers['login-customer-id'] = LOGIN_CUSTOMER_ID;
   const res = await fetch(`${GOOGLE_ADS_BASE}${path}`, {
     method: 'POST',
     headers,
