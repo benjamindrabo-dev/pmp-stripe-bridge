@@ -103,18 +103,54 @@ function minRatioForUnits(units) {
   return 0.97;                 // single unit: no automatic discount exists
 }
 
+const YEAST_VARIANT_ID = 43405787168842;
+
+function canonicalYeastBundleLines(item, catalogCents) {
+  const quantity = Number(item.quantity);
+  const base = { ...item, variant_id: YEAST_VARIANT_ID };
+
+  if (quantity === 1) {
+    return [{
+      ...base,
+      quantity: 1,
+      price_cents: Math.round(catalogCents * 0.70),
+      title: String(item.title || "Yeast Infection Relief") + " — 30% off",
+    }];
+  }
+
+  if (quantity === 3 || quantity === 5) {
+    const paidQuantity = quantity === 3 ? 2 : 3;
+    const freeQuantity = quantity - paidQuantity;
+    return [
+      {
+        ...base,
+        quantity: paidQuantity,
+        price_cents: catalogCents,
+        title: String(item.title || "Yeast Infection Relief") + " — paid bottles",
+      },
+      {
+        ...base,
+        quantity: freeQuantity,
+        price_cents: 0,
+        title: String(item.title || "Yeast Infection Relief") + " — free bottles",
+      },
+    ];
+  }
+
+  return null;
+}
+
 async function assertPricesLegit(items, CUR) {
   const cur = CUR.toUpperCase();
   if (!ALLOWED_CURRENCIES.includes(cur)) throw reject("Unsupported currency");
   if (items.length > 50) throw reject("Too many items");
-  let units = 0;
   for (const it of items) {
     const qn = Number(it.quantity);
     if (!Number.isInteger(qn) || qn < 1 || qn > 50) throw reject("Invalid quantity");
     const pc = Number(it.price_cents);
     if (!Number.isFinite(pc) || pc < 0) throw reject("Invalid price");
-    units += qn;
   }
+
   const country = MARKET_COUNTRY[cur];
   const ids = items.map((it) => `gid://shopify/ProductVariant/${Number(it.variant_id)}`);
   const q = `query($ids:[ID!]!){ nodes(ids:$ids){ ... on ProductVariant { id contextualPricing(context:{country:${country}}){ price { amount currencyCode } } } } }`;
@@ -127,15 +163,16 @@ async function assertPricesLegit(items, CUR) {
     });
     j = await r.json();
   } catch (e) {
-    // Shopify outage — not attacker-triggerable. Availability over strictness.
-    console.error("price-check FAIL-OPEN (Shopify unreachable):", String(e && e.message || e));
-    return;
+    console.error("price-check FAIL-CLOSED (Shopify unreachable):", String(e && e.message || e));
+    throw new Error("Price service unavailable");
   }
+
   const nodes = j && j.data && j.data.nodes;
   if (!Array.isArray(nodes)) {
-    console.error("price-check FAIL-OPEN (bad Shopify response):", JSON.stringify(j || {}).slice(0, 200));
-    return;
+    console.error("price-check FAIL-CLOSED (bad Shopify response):", JSON.stringify(j || {}).slice(0, 200));
+    throw new Error("Price service unavailable");
   }
+
   const priceById = {};
   for (const n of nodes) {
     if (n && n.contextualPricing && n.contextualPricing.price) {
@@ -145,19 +182,43 @@ async function assertPricesLegit(items, CUR) {
       priceById[n.id] = Number(n.contextualPricing.price.amount);
     }
   }
-  let catalog = 0, given = 0;
+
+  const normalized = [];
+  let catalog = 0;
+  let given = 0;
+  let validatedUnits = 0;
+
   for (const it of items) {
-    const p = priceById[`gid://shopify/ProductVariant/${Number(it.variant_id)}`];
-    if (p == null) throw reject("Unknown product variant");
-    const qn = Number(it.quantity) || 1;
-    catalog += p * qn;
-    given += ((Number(it.price_cents) || 0) / 100) * qn;
+    const variantId = Number(it.variant_id);
+    const price = priceById[`gid://shopify/ProductVariant/${variantId}`];
+    if (price == null) throw reject("Unknown product variant");
+
+    const quantity = Number(it.quantity);
+    const catalogCents = Math.round(price * 100);
+    const yeastLines = variantId === YEAST_VARIANT_ID
+      ? canonicalYeastBundleLines(it, catalogCents)
+      : null;
+
+    if (yeastLines) {
+      normalized.push(...yeastLines);
+      continue;
+    }
+
+    normalized.push({ ...it, variant_id: variantId, quantity });
+    catalog += price * quantity;
+    given += (Number(it.price_cents) / 100) * quantity;
+    validatedUnits += quantity;
   }
-  const ratio = Number(process.env.MIN_TOTAL_RATIO || minRatioForUnits(units));
-  if (given < catalog * ratio - 0.01 || given > catalog * 1.02 + 0.01) {
-    console.error(`price-check REJECTED: given=${given.toFixed(2)} catalog=${catalog.toFixed(2)} ${cur} units=${units}`);
-    throw reject("Price validation failed");
+
+  if (validatedUnits > 0) {
+    const ratio = Number(process.env.MIN_TOTAL_RATIO || minRatioForUnits(validatedUnits));
+    if (given < catalog * ratio - 0.01 || given > catalog * 1.02 + 0.01) {
+      console.error(`price-check REJECTED: given=${given.toFixed(2)} catalog=${catalog.toFixed(2)} ${cur} units=${validatedUnits}`);
+      throw reject("Price validation failed");
+    }
   }
+
+  return normalized;
 }
 
 export default async function handler(req, res) {
@@ -167,19 +228,19 @@ export default async function handler(req, res) {
 
   try {
     const {
-      items, note, currency, fbp, fbc, external_id,
+      items: requestedItems, note, currency, fbp, fbc, external_id,
       landing_url, referrer,
       utm_source, utm_medium, utm_campaign, utm_content, utm_term,
       gclid, gbraid, wbraid, ttclid, msclkid,
     } = req.body || {};
-    if (!Array.isArray(items) || items.length === 0) {
+    if (!Array.isArray(requestedItems) || requestedItems.length === 0) {
       return res.status(400).json({ error: "Empty cart" });
     }
     // Currency follows the Shopify cart; env CURRENCY is only a fallback.
     const CUR = String(currency || process.env.CURRENCY || "usd").toLowerCase();
 
     // Never trust browser-sent prices — verify against Shopify first.
-    await assertPricesLegit(items, CUR);
+    const items = await assertPricesLegit(requestedItems, CUR);
 
     const params = new URLSearchParams();
     params.append("mode", "payment");
