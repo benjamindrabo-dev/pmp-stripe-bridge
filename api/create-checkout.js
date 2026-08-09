@@ -103,41 +103,53 @@ function minRatioForUnits(units) {
   return 0.97;                 // single unit: no automatic discount exists
 }
 
-const YEAST_VARIANT_ID = 43405787168842;
+// Native theme bundles. Prices are never trusted from the browser: Shopify's
+// contextual catalog price is the source of truth for every market/currency.
+// The browser only identifies which of the three published offers was selected.
+const NATIVE_BUNDLE_VARIANT_IDS = new Set([
+  43676450193482, 43433440903242, 43449461669962, 43449177636938,
+  43433415802954, 43668777631818, 43675418656842, 43449159516234,
+  43405787168842, 43449778765898, 43349565112394, 43660914163786,
+  43660092473418, 43433439887434, 43449777160266,
+]);
 
-function canonicalYeastBundleLines(item, catalogCents) {
+function canonicalNativeBundleLines(item, catalogCents) {
+  const variantId = Number(item.variant_id);
+  if (!NATIVE_BUNDLE_VARIANT_IDS.has(variantId)) return null;
+
   const quantity = Number(item.quantity);
-  const base = { ...item, variant_id: YEAST_VARIANT_ID };
+  const selectedBundle = Number(item.bundle_quantity);
+  if (![1, 3, 5].includes(selectedBundle) || selectedBundle !== quantity) return null;
+
+  const base = { ...item, variant_id: variantId };
+  delete base.bundle_quantity;
 
   if (quantity === 1) {
     return [{
       ...base,
       quantity: 1,
-      price_cents: Math.round(catalogCents * 0.70),
-      title: String(item.title || "Yeast Infection Relief") + " — 30% off",
+      price_cents: catalogCents,
+      title: String(item.title || "Pure Majesty product"),
     }];
   }
 
-  if (quantity === 3 || quantity === 5) {
-    const paidQuantity = quantity === 3 ? 2 : 3;
-    const freeQuantity = quantity - paidQuantity;
-    return [
-      {
-        ...base,
-        quantity: paidQuantity,
-        price_cents: catalogCents,
-        title: String(item.title || "Yeast Infection Relief") + " — paid bottles",
-      },
-      {
-        ...base,
-        quantity: freeQuantity,
-        price_cents: 0,
-        title: String(item.title || "Yeast Infection Relief") + " — free bottles",
-      },
-    ];
-  }
-
-  return null;
+  const paidQuantity = quantity === 3 ? 2 : 3;
+  const freeQuantity = quantity - paidQuantity;
+  const offer = quantity === 3 ? "Buy 2, get 1 free" : "Buy 3, get 2 free";
+  return [
+    {
+      ...base,
+      quantity: paidQuantity,
+      price_cents: catalogCents,
+      title: String(item.title || "Pure Majesty product") + " — " + offer,
+    },
+    {
+      ...base,
+      quantity: freeQuantity,
+      price_cents: 0,
+      title: String(item.title || "Pure Majesty product") + " — free units",
+    },
+  ];
 }
 
 async function assertPricesLegit(items, CUR) {
@@ -195,12 +207,9 @@ async function assertPricesLegit(items, CUR) {
 
     const quantity = Number(it.quantity);
     const catalogCents = Math.round(price * 100);
-    const yeastLines = variantId === YEAST_VARIANT_ID
-      ? canonicalYeastBundleLines(it, catalogCents)
-      : null;
-
-    if (yeastLines) {
-      normalized.push(...yeastLines);
+    const bundleLines = canonicalNativeBundleLines(it, catalogCents);
+    if (bundleLines) {
+      normalized.push(...bundleLines);
       continue;
     }
 
