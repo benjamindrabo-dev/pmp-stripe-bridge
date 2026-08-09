@@ -1,35 +1,6 @@
 // GET /api/tracking-health
 // Safe operational health check. It never returns secret values.
-
-async function stripeSessionAttribution(id) {
-  const r = await fetch(`https://api.stripe.com/v1/checkout/sessions/${encodeURIComponent(id)}`, {
-    headers: { Authorization: `Bearer ${process.env.STRIPE_SECRET_KEY}` },
-  });
-  const s = await r.json();
-  if (!r.ok) throw new Error(s?.error?.message || `Stripe ${r.status}`);
-  const m = s.metadata || {};
-  let referrerHost = null;
-  let landingPath = null;
-  try { referrerHost = m.referrer ? new URL(m.referrer).hostname : null; } catch {}
-  try { landingPath = m.landing_page ? new URL(m.landing_page).pathname : null; } catch {}
-  return {
-    paid: s.payment_status === 'paid',
-    amount_total: s.amount_total ?? null,
-    currency: s.currency ? String(s.currency).toUpperCase() : null,
-    has_fbc: Boolean(m.fbc),
-    has_fbp: Boolean(m.fbp),
-    has_gclid: Boolean(m.gclid),
-    has_gbraid: Boolean(m.gbraid),
-    has_wbraid: Boolean(m.wbraid),
-    utm_source: m.utm_source || null,
-    utm_medium: m.utm_medium || null,
-    utm_campaign: m.utm_campaign || null,
-    referrer_host: referrerHost,
-    landing_path: landingPath,
-  };
-}
-
-export default async function handler(req, res) {
+export default function handler(req, res) {
   res.setHeader("Cache-Control", "no-store, private");
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
@@ -45,7 +16,7 @@ export default async function handler(req, res) {
     meta_capi_token: Boolean(process.env.META_CAPI_TOKEN),
   };
 
-  const out = {
+  return res.status(200).json({
     ok: Object.values(required).every(Boolean),
     tracking_version: "pmp_v3_google",
     environment: process.env.VERCEL_ENV || null,
@@ -66,18 +37,5 @@ export default async function handler(req, res) {
     },
     store_origin: process.env.STORE_ORIGIN || null,
     dependencies: required,
-  };
-
-  if (String(req.query?.audit || '') === 'recent-meta') {
-    out.recent_meta_audit = {};
-    for (const [order, id] of Object.entries({
-      '#1557': 'cs_live_b168HOGF8QJv6218uChGZ0NdEAyTwMpAzzwY5Pw32lxilc4zUJH8lfxVNK',
-      '#1558': 'cs_live_b1TTMfQg9cYxmtoEwKkCZINYaYVgNrvDLEHHJDUOAGXNWrNsOiNDcBeTaw',
-    })) {
-      try { out.recent_meta_audit[order] = await stripeSessionAttribution(id); }
-      catch (e) { out.recent_meta_audit[order] = { error: String(e?.message || e) }; }
-    }
-  }
-
-  return res.status(200).json(out);
+  });
 }
