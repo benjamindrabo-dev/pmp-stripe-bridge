@@ -34,16 +34,17 @@ async function googleSearch(token, customerId, query) {
 async function googleAddToCartRows() {
   const token = await googleAccessToken();
   const customerId = String(process.env.GOOGLE_ADS_CUSTOMER_ID || '6591205737').replace(/\D/g, '');
-  const query = `SELECT campaign.id, campaign.name, segments.date, segments.hour, segments.conversion_action_name, metrics.all_conversions, metrics.all_conversions_value FROM campaign WHERE segments.date DURING LAST_7_DAYS AND segments.conversion_action_name = 'puremajestypet.com (web) add_to_cart' AND metrics.all_conversions > 0`;
+  const query = `SELECT campaign.id, campaign.name, segments.date, segments.hour, segments.conversion_action_name, metrics.all_conversions, metrics.all_conversions_value FROM campaign WHERE segments.date DURING LAST_30_DAYS AND metrics.all_conversions > 0`;
   const rows = await googleSearch(token, customerId, query);
   const conversions = rows.map((row) => ({
     campaign_id: String(row.campaign?.id || ''),
     campaign: row.campaign?.name || null,
+    action: row.segments?.conversionActionName || null,
     date: row.segments?.date || null,
     hour: row.segments?.hour ?? null,
     conversions: Number(row.metrics?.allConversions || 0),
     value: Number(row.metrics?.allConversionsValue || 0),
-  })).filter((row) => row.campaign_id && row.date && row.conversions > 0);
+  })).filter((row) => row.campaign_id && row.date && row.conversions > 0 && /cart/i.test(String(row.action || '')));
 
   for (const row of conversions) {
     const clickQuery = `SELECT click_view.gclid, campaign.id, campaign.name, segments.date, metrics.clicks FROM click_view WHERE segments.date = '${row.date}' AND campaign.id = ${row.campaign_id}`;
@@ -54,11 +55,11 @@ async function googleAddToCartRows() {
   return conversions;
 }
 
-async function recentStripeSessions(days = 7) {
+async function recentStripeSessions(days = 30) {
   const out = [];
   let startingAfter = null;
   const gte = Math.floor(Date.now() / 1000) - days * 86400;
-  for (let page = 0; page < 5; page += 1) {
+  for (let page = 0; page < 10; page += 1) {
     const params = new URLSearchParams({ limit: '100', 'created[gte]': String(gte) });
     if (startingAfter) params.set('starting_after', startingAfter);
     const r = await fetch(`https://api.stripe.com/v1/checkout/sessions?${params.toString()}`, {
@@ -76,12 +77,13 @@ async function recentStripeSessions(days = 7) {
 
 async function auditGoogleCartToStripe() {
   const conversionRows = await googleAddToCartRows();
-  const sessions = await recentStripeSessions(7);
+  const sessions = await recentStripeSessions(30);
   return conversionRows.map((row) => {
     const gclidSet = new Set(row.gclids || []);
     const matches = sessions.filter((s) => gclidSet.has(String(s.metadata?.gclid || '')));
     return {
       campaign: row.campaign,
+      action: row.action,
       conversion_date: row.date,
       conversion_hour: row.hour,
       google_add_to_cart: row.conversions,
