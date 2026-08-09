@@ -1,4 +1,4 @@
-name: Apply Primary Google Ads Account
+name: Use Direct Google Ads Access
 
 on:
   push:
@@ -15,24 +15,21 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Apply known non-secret configuration
-        run: python3 scripts/embed-known-config.py
+      - name: Remove forced MCC login header
+        run: python3 scripts/use-direct-google-ads-access.py
 
       - name: Syntax check
-        run: |
-          node --check api/mcp.js
-          node --check lib/mcp-oauth.js
-          node --check lib/mcp-health.js
+        run: node --check api/mcp.js
 
-      - name: Commit primary Google Ads account
+      - name: Commit direct Google Ads access
         shell: bash
         run: |
-          if git diff --quiet -- api/mcp.js lib/mcp-oauth.js lib/mcp-health.js; then
-            echo "Primary Google Ads account is already configured."
+          if git diff --quiet -- api/mcp.js; then
+            echo "Direct Google Ads access is already configured."
             exit 0
           fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add api/mcp.js lib/mcp-oauth.js lib/mcp-health.js
-          git commit -m "Use Google Ads account 6591205737 as primary"
+          git add api/mcp.js
+          git commit -m "Use direct Google Ads customer access"
           git push
