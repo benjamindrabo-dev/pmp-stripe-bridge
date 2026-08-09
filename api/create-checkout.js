@@ -97,10 +97,12 @@ function safePageUrl(value) {
   }
 }
 
+// Applies to PAID units only (see assertPricesLegit): free-gift lines are
+// validated separately, so this no longer has to absorb "buy X get Y free".
+// It only needs to cover percentage discounts on the paid units themselves.
 function minRatioForUnits(units) {
-  if (units >= 4) return 0.73; // Buy 3 get 1 free = 0.75 legit
-  if (units >= 2) return 0.78; // Buy 2 −20% = 0.80 legit
-  return 0.97;                 // single unit: no automatic discount exists
+  if (units >= 2) return 0.75; // Buy 2 −20% = 0.80 legit, margin for new tiers
+  return 0.90;                 // single unit: no automatic discount exists
 }
 
 const YEAST_VARIANT_ID = 43405787168842;
@@ -186,7 +188,9 @@ async function assertPricesLegit(items, CUR) {
   const normalized = [];
   let catalog = 0;
   let given = 0;
-  let validatedUnits = 0;
+  let paidUnits = 0;
+  let freeUnits = 0;
+  const paidVariants = new Set();
 
   for (const it of items) {
     const variantId = Number(it.variant_id);
@@ -205,15 +209,48 @@ async function assertPricesLegit(items, CUR) {
     }
 
     normalized.push({ ...it, variant_id: variantId, quantity });
-    catalog += price * quantity;
-    given += (Number(it.price_cents) / 100) * quantity;
-    validatedUnits += quantity;
+
+    // The bundle app grants gifts as SEPARATE lines priced at 0. Judging the
+    // whole cart against a single ratio meant every more-generous offer
+    // silently broke checkout: a "2 paid + 1 free" cart sits at 0.667 and a
+    // "5 paid + 3 free" cart at 0.625, both under the old 0.73/0.78 floor.
+    // Small carts still went through, so orders never stopped completely and
+    // nothing raised an alarm — only the biggest baskets died, showing the
+    // shopper "Something went wrong". Paid and free lines are now judged apart.
+    const unit = Number(it.price_cents) / 100;
+    if (unit > 0) {
+      paidVariants.add(variantId);
+      paidUnits += quantity;
+      catalog += price * quantity;
+      given += unit * quantity;
+    } else {
+      freeUnits += quantity;
+    }
   }
 
-  if (validatedUnits > 0) {
-    const ratio = Number(process.env.MIN_TOTAL_RATIO || minRatioForUnits(validatedUnits));
+  // A free line is legitimate only when the same variant is also bought, and
+  // gifts can never outnumber paid units. An attacker therefore cannot zero out
+  // a cart: at least half the units stay paid at near-catalog price, whatever
+  // the offer. Any "buy X get Y free" up to 1:1 passes without recalibration.
+  if (freeUnits > 0) {
+    for (const it of items) {
+      if (Number(it.variant_id) === YEAST_VARIANT_ID) continue; // rewritten server-side above
+      if (Number(it.price_cents) > 0) continue;
+      if (!paidVariants.has(Number(it.variant_id))) {
+        console.error(`price-check REJECTED: free line for an unpurchased variant (${it.variant_id})`);
+        throw reject("Price validation failed");
+      }
+    }
+    if (freeUnits > paidUnits) {
+      console.error(`price-check REJECTED: free=${freeUnits} > paid=${paidUnits}`);
+      throw reject("Price validation failed");
+    }
+  }
+
+  if (paidUnits > 0) {
+    const ratio = Number(process.env.MIN_TOTAL_RATIO || minRatioForUnits(paidUnits));
     if (given < catalog * ratio - 0.01 || given > catalog * 1.02 + 0.01) {
-      console.error(`price-check REJECTED: given=${given.toFixed(2)} catalog=${catalog.toFixed(2)} ${cur} units=${validatedUnits}`);
+      console.error(`price-check REJECTED: given=${given.toFixed(2)} catalog=${catalog.toFixed(2)} ${cur} paid=${paidUnits} free=${freeUnits}`);
       throw reject("Price validation failed");
     }
   }
