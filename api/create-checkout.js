@@ -105,43 +105,6 @@ function minRatioForUnits(units) {
   return 0.90;                 // single unit: no automatic discount exists
 }
 
-const YEAST_VARIANT_ID = 43405787168842;
-
-function canonicalYeastBundleLines(item, catalogCents) {
-  const quantity = Number(item.quantity);
-  const base = { ...item, variant_id: YEAST_VARIANT_ID };
-
-  if (quantity === 1) {
-    return [{
-      ...base,
-      quantity: 1,
-      price_cents: Math.round(catalogCents * 0.70),
-      title: String(item.title || "Yeast Infection Relief") + " — 30% off",
-    }];
-  }
-
-  if (quantity === 3 || quantity === 5) {
-    const paidQuantity = quantity === 3 ? 2 : 3;
-    const freeQuantity = quantity - paidQuantity;
-    return [
-      {
-        ...base,
-        quantity: paidQuantity,
-        price_cents: catalogCents,
-        title: String(item.title || "Yeast Infection Relief") + " — paid bottles",
-      },
-      {
-        ...base,
-        quantity: freeQuantity,
-        price_cents: 0,
-        title: String(item.title || "Yeast Infection Relief") + " — free bottles",
-      },
-    ];
-  }
-
-  return null;
-}
-
 async function assertPricesLegit(items, CUR) {
   const cur = CUR.toUpperCase();
   if (!ALLOWED_CURRENCIES.includes(cur)) throw reject("Unsupported currency");
@@ -198,16 +161,6 @@ async function assertPricesLegit(items, CUR) {
     if (price == null) throw reject("Unknown product variant");
 
     const quantity = Number(it.quantity);
-    const catalogCents = Math.round(price * 100);
-    const yeastLines = variantId === YEAST_VARIANT_ID
-      ? canonicalYeastBundleLines(it, catalogCents)
-      : null;
-
-    if (yeastLines) {
-      normalized.push(...yeastLines);
-      continue;
-    }
-
     normalized.push({ ...it, variant_id: variantId, quantity });
 
     // The bundle app grants gifts as SEPARATE lines priced at 0. Judging the
@@ -234,7 +187,6 @@ async function assertPricesLegit(items, CUR) {
   // the offer. Any "buy X get Y free" up to 1:1 passes without recalibration.
   if (freeUnits > 0) {
     for (const it of items) {
-      if (Number(it.variant_id) === YEAST_VARIANT_ID) continue; // rewritten server-side above
       if (Number(it.price_cents) > 0) continue;
       if (!paidVariants.has(Number(it.variant_id))) {
         console.error(`price-check REJECTED: free line for an unpurchased variant (${it.variant_id})`);
