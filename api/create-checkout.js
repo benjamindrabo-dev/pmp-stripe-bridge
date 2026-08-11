@@ -221,6 +221,7 @@ export default async function handler(req, res) {
       landing_url, referrer,
       utm_source, utm_medium, utm_campaign, utm_content, utm_term,
       gclid, gbraid, wbraid, ttclid, msclkid,
+      ga_client_id, ga_session_id, ga_session_number,
     } = req.body || {};
     if (!Array.isArray(requestedItems) || requestedItems.length === 0) {
       return res.status(400).json({ error: "Empty cart" });
@@ -279,6 +280,11 @@ export default async function handler(req, res) {
       wbraid: safeText(wbraid, 255),
       ttclid: safeText(ttclid, 255),
       msclkid: safeText(msclkid, 255),
+      // GA4 identity captured in the browser: it is the only way the webhook's
+      // Measurement Protocol purchase can be attached to the original session.
+      ga_client_id: safeText(ga_client_id, 64),
+      ga_session_id: safeText(ga_session_id, 64),
+      ga_session_number: safeText(ga_session_number, 64),
     };
     Object.entries(attribution).forEach(([key, value]) => {
       if (value) params.append(`metadata[${key}]`, value);
@@ -348,6 +354,9 @@ export default async function handler(req, res) {
       wbraid: attribution.wbraid,
       ttclid: attribution.ttclid,
       msclkid: attribution.msclkid,
+      ga_client_id: attribution.ga_client_id,
+      ga_session_id: attribution.ga_session_id,
+      ga_session_number: attribution.ga_session_number,
       ua: req.headers["user-agent"] || null,
       ip: String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || null,
     });
