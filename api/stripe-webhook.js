@@ -784,12 +784,6 @@ export default async function handler(req, res) {
           // before persisting the GA4 intention. Rebuild it here — BEFORE the
           // done marker and before the cart is deleted — otherwise this path
           // acknowledges the webhook and the conversion is lost for good.
-          // The cart may already have been deleted (or expired) on this path:
-          // read it first, and fall back on session.metadata for the GA4 ids.
-          let reconciledCart = null;
-          try { reconciledCart = await kvGet(key); }
-          catch (e) { console.error("GA4 reconciliation: cart read failed for", key, String((e && e.message) || e)); }
-
           // Failing to PERSIST a tracking intention must fail the webhook.
           // Writing done: anyway would make Stripe's redelivery answer
           // `duplicate: true` and the conversion would be lost for good.
@@ -798,92 +792,118 @@ export default async function handler(req, res) {
           // never lands here.
           const reconcilePersistFailures = [];
 
-          try {
-            const existingGa4 = await kvGet(`ga4:${session.id}`);
-            if (existingGa4 && existingGa4.session_id) {
-              console.log("GA4 reconciliation: outbox entry already present for", session.id, "status:", existingGa4.status);
-            } else {
-              const reconciledClientId =
-                (reconciledCart && reconciledCart.ga_client_id) ||
-                (session.metadata && session.metadata.ga_client_id) || null;
-              if (!reconciledClientId) {
-                // A fabricated client_id would create a parasitic
-                // direct/(none) user: no entry at all is the lesser evil.
-                console.error("GA4 reconciliation SKIPPED for", session.id, ": no ga_client_id (cart + session.metadata both empty)");
-              } else {
-                // Without the cart there are no lines: the purchase is queued
-                // WITHOUT items (value 0) rather than not queued at all.
-                // existingOrder carries no line_items, so item_name is simply
-                // omitted — never invented. No promo amount was fetched on this
-                // path: discountCents stays 0, so `value` is the GROSS items
-                // total, which may exceed the amount actually charged when a
-                // Stripe promotion code was used. Logged below, never guessed.
-                let reconciledItems = [];
-                if (reconciledCart) {
-                  try { reconciledItems = buildGa4Items(reconciledCart, null, 0); }
-                  catch (e) { console.error("GA4 reconciliation items build failed", e); reconciledItems = []; }
-                } else {
-                  console.warn("GA4 reconciliation for", session.id, ": cart unavailable — queuing purchase WITHOUT items (value 0)");
-                }
-                await ga4PersistIntent({
-                  sessionId: session.id,
-                  itemsValueCents: ga4ItemsValueCents(reconciledItems),
-                  chargedCents: session.amount_total,
-                  currency: session.currency || (reconciledCart && reconciledCart.currency),
-                  gaClientId: reconciledClientId,
-                  gaSessionId: (reconciledCart && reconciledCart.ga_session_id) || (session.metadata && session.metadata.ga_session_id) || null,
-                  gaSessionNumber: (reconciledCart && reconciledCart.ga_session_number) || (session.metadata && session.metadata.ga_session_number) || null,
-                  items: reconciledItems,
-                  timestampMicros: ga4TimestampMicros(event),
-                });
-              }
-            }
-          } catch (e) {
-            // Technical failure (Redis/Upstash): refuse to write done: and let
-            // Stripe redeliver. The order already exists in Shopify and
-            // findShopifyOrder() brings us straight back here.
-            reconcilePersistFailures.push("ga4: " + String((e && e.message) || e));
-            console.error("GA4 reconciliation outbox persist FAILED for", session.id, e);
+          // The cart may already have been deleted (or expired) on this path:
+          // read it first, and fall back on session.metadata for the GA4 ids.
+          // Reading it obeys exactly the same rule as writing the outbox:
+          //   - kvGet returns null  -> the cart is GENUINELY absent (expired
+          //     past its 30-day TTL, or already deleted by an earlier run). A
+          //     legitimate, definitive state: the degraded intention (no items,
+          //     value 0) is persisted below, unchanged, and we answer 200.
+          //   - kvGet THROWS        -> TECHNICAL failure (Redis unavailable,
+          //     timeout, unusable Upstash response). The cart is probably still
+          //     there. Persisting a degraded intention now would be definitive,
+          //     because outboxEnqueue is idempotent and would never rebuild it.
+          //     So we persist NOTHING, keep the cart, skip done:, and 500 so
+          //     Stripe redelivers and the cart is read properly next time.
+          let reconciledCart = null;
+          let cartReadFailed = false;
+          try { reconciledCart = await kvGet(key); }
+          catch (e) {
+            cartReadFailed = true;
+            reconcilePersistFailures.push("cart read: " + String((e && e.message) || e));
+            console.error("reconciliation: cart read failed for", key, String((e && e.message) || e));
           }
 
-          // Same treatment for Meta CAPI, under the same conditions: BEFORE the
-          // done marker and BEFORE the cart is deleted, reading the cart above
-          // (reconciledCart) before any deletion. outboxEnqueue is idempotent,
-          // so an entry already sent by the delivery that created the order is
-          // never resurrected. Fully wrapped: no Meta path may fail the order.
-          try {
-            const rcd = session.customer_details || {};
-            const rsd = (session.collected_information && session.collected_information.shipping_details) || session.shipping_details || {};
-            await metaPersistIntent({
-              sessionId: session.id,
-              email: rcd.email,
-              phone: rcd.phone,
-              // Identical semantics to the nominal path: amount actually charged.
-              value: (Number(session.amount_total) || 0) / 100,
-              currency: session.currency || (reconciledCart && reconciledCart.currency),
-              cart: reconciledCart,
-              address: rsd.address || rcd.address || {},
-              name: rsd.name || rcd.name,
-              orderId: existingOrder.legacyResourceId || existingOrder.id,
-              orderNumber: existingOrder.name,
-              // Cart may be gone: fbp / fbc / browser id survive in Stripe
-              // metadata. ua and ip do NOT exist there and stay absent.
-              fallback: {
-                fbp: (session.metadata && session.metadata.fbp) || null,
-                fbc: (session.metadata && session.metadata.fbc) || null,
-                external_id: (session.metadata && (session.metadata.browser_id || session.metadata.person_id)) || null,
-              },
-            });
-          } catch (e) {
-            reconcilePersistFailures.push("meta: " + String((e && e.message) || e));
-            console.error("Meta reconciliation outbox persist FAILED for", session.id, e);
+          // Skipped entirely when the cart read failed technically: an
+          // impoverished intention persisted here could never be rebuilt.
+          if (!cartReadFailed) {
+            try {
+              const existingGa4 = await kvGet(`ga4:${session.id}`);
+              if (existingGa4 && existingGa4.session_id) {
+                console.log("GA4 reconciliation: outbox entry already present for", session.id, "status:", existingGa4.status);
+              } else {
+                const reconciledClientId =
+                  (reconciledCart && reconciledCart.ga_client_id) ||
+                  (session.metadata && session.metadata.ga_client_id) || null;
+                if (!reconciledClientId) {
+                  // A fabricated client_id would create a parasitic
+                  // direct/(none) user: no entry at all is the lesser evil.
+                  console.error("GA4 reconciliation SKIPPED for", session.id, ": no ga_client_id (cart + session.metadata both empty)");
+                } else {
+                  // Without the cart there are no lines: the purchase is queued
+                  // WITHOUT items (value 0) rather than not queued at all.
+                  // existingOrder carries no line_items, so item_name is simply
+                  // omitted — never invented. No promo amount was fetched on this
+                  // path: discountCents stays 0, so `value` is the GROSS items
+                  // total, which may exceed the amount actually charged when a
+                  // Stripe promotion code was used. Logged below, never guessed.
+                  let reconciledItems = [];
+                  if (reconciledCart) {
+                    try { reconciledItems = buildGa4Items(reconciledCart, null, 0); }
+                    catch (e) { console.error("GA4 reconciliation items build failed", e); reconciledItems = []; }
+                  } else {
+                    console.warn("GA4 reconciliation for", session.id, ": cart unavailable — queuing purchase WITHOUT items (value 0)");
+                  }
+                  await ga4PersistIntent({
+                    sessionId: session.id,
+                    itemsValueCents: ga4ItemsValueCents(reconciledItems),
+                    chargedCents: session.amount_total,
+                    currency: session.currency || (reconciledCart && reconciledCart.currency),
+                    gaClientId: reconciledClientId,
+                    gaSessionId: (reconciledCart && reconciledCart.ga_session_id) || (session.metadata && session.metadata.ga_session_id) || null,
+                    gaSessionNumber: (reconciledCart && reconciledCart.ga_session_number) || (session.metadata && session.metadata.ga_session_number) || null,
+                    items: reconciledItems,
+                    timestampMicros: ga4TimestampMicros(event),
+                  });
+                }
+              }
+            } catch (e) {
+              // Technical failure (Redis/Upstash): refuse to write done: and let
+              // Stripe redeliver. The order already exists in Shopify and
+              // findShopifyOrder() brings us straight back here.
+              reconcilePersistFailures.push("ga4: " + String((e && e.message) || e));
+              console.error("GA4 reconciliation outbox persist FAILED for", session.id, e);
+            }
+
+            // Same treatment for Meta CAPI, under the same conditions: BEFORE the
+            // done marker and BEFORE the cart is deleted, reading the cart above
+            // (reconciledCart) before any deletion. outboxEnqueue is idempotent,
+            // so an entry already sent by the delivery that created the order is
+            // never resurrected. Fully wrapped: no Meta path may fail the order.
+            try {
+              const rcd = session.customer_details || {};
+              const rsd = (session.collected_information && session.collected_information.shipping_details) || session.shipping_details || {};
+              await metaPersistIntent({
+                sessionId: session.id,
+                email: rcd.email,
+                phone: rcd.phone,
+                // Identical semantics to the nominal path: amount actually charged.
+                value: (Number(session.amount_total) || 0) / 100,
+                currency: session.currency || (reconciledCart && reconciledCart.currency),
+                cart: reconciledCart,
+                address: rsd.address || rcd.address || {},
+                name: rsd.name || rcd.name,
+                orderId: existingOrder.legacyResourceId || existingOrder.id,
+                orderNumber: existingOrder.name,
+                // Cart may be gone: fbp / fbc / browser id survive in Stripe
+                // metadata. ua and ip do NOT exist there and stay absent.
+                fallback: {
+                  fbp: (session.metadata && session.metadata.fbp) || null,
+                  fbc: (session.metadata && session.metadata.fbc) || null,
+                  external_id: (session.metadata && (session.metadata.browser_id || session.metadata.person_id)) || null,
+                },
+              });
+            } catch (e) {
+              reconcilePersistFailures.push("meta: " + String((e && e.message) || e));
+              console.error("Meta reconciliation outbox persist FAILED for", session.id, e);
+            }
           }
 
           // Exit BEFORE kvSet(doneKey) and BEFORE the cart kvDel below: the
           // cart must survive so the redelivery can rebuild the payloads.
           if (reconcilePersistFailures.length) {
             try { await kvRelease(claimKey, claimToken); } catch (releaseError) { console.error("lease release failed", releaseError); }
-            console.error("tracking outbox persist failed on the reconciliation path for", session.id, "— order exists in Shopify, asking Stripe to redeliver:", reconcilePersistFailures.join(" | "));
+            console.error("cart read or tracking outbox persist failed on the reconciliation path for", session.id, "— order exists in Shopify, asking Stripe to redeliver:", reconcilePersistFailures.join(" | "));
             return res.status(500).json({
               error: "order exists but tracking persistence failed, retry",
               order_created: true,
