@@ -1,4 +1,11 @@
-// GET /api/ga4-retry?key=<GA4_RETRY_KEY|BACKFILL_KEY>[&max=25][&validate=1][&session=cs_...]
+// GET /api/ga4-retry[?max=25][&validate=1][&session=cs_...]
+//
+// AUTH: send the shared secret in the request header
+//   Authorization: Bearer <GA4_RETRY_KEY|BACKFILL_KEY>
+// The legacy `?key=<secret>` query parameter is still accepted as a fallback so
+// existing bookmarks/crons keep working, but it is DEPRECATED: a query string
+// leaks into proxy, CDN and platform access logs and into browser history.
+// Prefer the header; the query form will be removed once nothing uses it.
 //
 // Retry endpoint for the GA4 Measurement Protocol outbox written by
 // api/stripe-webhook.js. The webhook drains at most 3 entries per invocation;
@@ -15,16 +22,19 @@
 //
 // validate=1 does NOT send anything: it posts each pending payload to
 //   https://www.google-analytics.com/debug/mp/collect
-// with validationBehavior "ENFORCE_RECOMMENDATIONS" and returns the raw
-// validationMessages. That is the objective way to settle whether
-// engagement_time_msec belongs on this server-side purchase event.
+// with validation_behavior "ENFORCE_RECOMMENDATIONS" (underscore: that is the
+// documented field name) and returns the raw validationMessages. Google asks
+// that validation_behavior never be sent in production, so it is attached to
+// the /debug/mp/collect path only — never to /mp/collect.
 //
-// Protection is modelled on api/capi-backfill.js: a shared-secret query key.
+// Protection is modelled on api/capi-backfill.js: a shared secret.
 // It uses GA4_RETRY_KEY when that variable exists, and otherwise falls back to
 // the already-provisioned BACKFILL_KEY. There is deliberately NO kill switch
 // equivalent to ENABLE_BACKFILL: replaying this outbox is idempotent-safe
 // (transaction_id is the Stripe session id, GA4 de-dupes on it), and the whole
 // point is that it stays available when a conversion needs rescuing.
+
+import crypto from "crypto";
 
 const GA4_OUTBOX_TTL = 345600;           // 4 days
 const GA4_QUEUE_KEY = "ga4:queue";
@@ -69,7 +79,8 @@ async function ga4Post(payload, { validate = false } = {}) {
   const base = validate
     ? "https://www.google-analytics.com/debug/mp/collect"
     : "https://www.google-analytics.com/mp/collect";
-  const body = validate ? { ...payload, validationBehavior: "ENFORCE_RECOMMENDATIONS" } : payload;
+  // validation_behavior is attached ONLY on the debug path (see header).
+  const body = validate ? { ...payload, validation_behavior: "ENFORCE_RECOMMENDATIONS" } : payload;
   const r = await fetchWithTimeout(
     `${base}?measurement_id=${encodeURIComponent(measurementId)}&api_secret=${encodeURIComponent(apiSecret)}`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
@@ -104,11 +115,40 @@ async function trySend(entry) {
   return entry;
 }
 
+// Constant-time secret comparison (node:crypto, no dependency). Lengths are
+// compared first because timingSafeEqual throws on differing buffer sizes; the
+// length of a secret is not the secret. Never throws.
+function secretMatches(provided, expected) {
+  if (typeof provided !== "string" || typeof expected !== "string" || !provided || !expected) return false;
+  const a = Buffer.from(provided, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length) return false;
+  try { return crypto.timingSafeEqual(a, b); } catch { return false; }
+}
+
+// Authorization: Bearer <secret> first; ?key= second (deprecated, see header).
+function readProvidedSecret(req) {
+  const header = req && req.headers && (req.headers.authorization || req.headers.Authorization);
+  if (typeof header === "string") {
+    const m = /^Bearer\s+(.+)$/i.exec(header.trim());
+    if (m) return { value: m[1].trim(), via: "header" };
+  }
+  const q = (req && req.query) || {};
+  if (typeof q.key === "string" && q.key) return { value: q.key, via: "query" };
+  return { value: "", via: "none" };
+}
+
 export default async function handler(req, res) {
   const q = req.query || {};
   const expected = process.env.GA4_RETRY_KEY || process.env.BACKFILL_KEY;
-  if (!expected || q.key !== expected) {
-    return res.status(403).json({ error: "Forbidden (set GA4_RETRY_KEY or BACKFILL_KEY and pass ?key=)" });
+  const provided = readProvidedSecret(req);
+  if (!expected || !secretMatches(provided.value, expected)) {
+    return res.status(403).json({
+      error: "Forbidden (set GA4_RETRY_KEY or BACKFILL_KEY and send 'Authorization: Bearer <secret>')",
+    });
+  }
+  if (provided.via === "query") {
+    console.warn("ga4-retry: authenticated via the DEPRECATED ?key= query parameter; use the Authorization header");
   }
 
   const validate = q.validate === "1" || q.validate === "true";
@@ -153,7 +193,7 @@ export default async function handler(req, res) {
       // Validation must not consume the queue: everything popped goes back.
       for (const id of requeue) await kvRPush(GA4_QUEUE_KEY, id);
       return res.status(200).json({
-        mode: "validate", validationBehavior: "ENFORCE_RECOMMENDATIONS",
+        mode: "validate", validation_behavior: "ENFORCE_RECOMMENDATIONS",
         inspected: reports.length, queueLength: await kvLLen(GA4_QUEUE_KEY), reports,
       });
     }
