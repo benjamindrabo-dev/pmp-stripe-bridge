@@ -15,7 +15,17 @@
 //   ga4:<stripe_session_id>  JSON { session_id, payload, status, attempts,
 //                                  first_seen_at, sent_at?, last_error? }
 //                            status ∈ pending | sent | expired.  TTL 4 days.
+//   meta:<stripe_session_id> same schema for the Meta Conversions API body.
+//                            TTL 8 days (Meta accepts 7-day-old events).
 //   ga4:queue                LIST of pending stripe session ids (never SCAN).
+//                            SHARED by both channels — it holds session ids,
+//                            not payloads. The name is legacy; renaming it
+//                            would orphan the ids already queued in production.
+//
+// Drain mode therefore processes BOTH channels for each popped id and requeues
+// the id only while at least one channel is still pending. Without this the
+// drain would pop a session whose ga4 entry is already `sent`, count it as
+// `skipped`, NOT requeue it, and silently drop a pending Meta Purchase.
 //
 // GA4 drops events backdated by more than 72h, so an entry older than that is
 // marked `expired` and abandoned instead of being retried forever.
@@ -39,6 +49,11 @@ import crypto from "crypto";
 const GA4_OUTBOX_TTL = 345600;           // 4 days
 const GA4_QUEUE_KEY = "ga4:queue";
 const GA4_MAX_AGE_MS = 72 * 3600 * 1000; // GA4 backdating limit
+const OUTBOX_QUEUE_KEY = GA4_QUEUE_KEY;  // shared, bi-channel (see header)
+const OUTBOX_CHANNELS = ["ga4", "meta"];
+const META_OUTBOX_TTL = 691200;          // 8 days
+// GA4's 72h rule is a GA4 rule: the Conversions API accepts 7-day-old events.
+const META_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
 
 async function redisCommand(command) {
   const r = await fetch(process.env.UPSTASH_REDIS_REST_URL, {
@@ -112,6 +127,48 @@ async function trySend(entry) {
     entry.last_error = String((e && e.message) || e).slice(0, 200);
   }
   await kvSet(key, entry, GA4_OUTBOX_TTL);
+  return entry;
+}
+
+async function metaPost(body) {
+  const pixelId = process.env.META_PIXEL_ID;
+  const token = process.env.META_CAPI_TOKEN;
+  if (!pixelId || !token) throw new Error("META_PIXEL_ID / META_CAPI_TOKEN not set");
+  const r = await fetchWithTimeout(
+    `https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${encodeURIComponent(token)}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+    8000
+  );
+  const j = await r.json().catch(() => null);
+  return { ok: r.ok, status: r.status, json: j };
+}
+
+// Meta twin of trySend(). event_id is the Stripe session id and is stored in
+// the payload, so a replay is de-duplicated by Meta against the browser pixel.
+async function metaTrySend(entry) {
+  const key = `meta:${entry.session_id}`;
+  const evt = entry.payload && entry.payload.data && entry.payload.data[0];
+  const eventTime = Number(evt && evt.event_time) || 0;
+  if (eventTime > 0 && Date.now() - eventTime * 1000 > META_MAX_AGE_MS) {
+    entry.status = "expired";
+    entry.last_error = "older than Meta's 7-day event window — abandoned";
+    await kvSet(key, entry, META_OUTBOX_TTL);
+    return entry;
+  }
+  try {
+    const r = await metaPost(entry.payload);
+    if (!r.ok || !r.json || r.json.events_received !== 1) {
+      throw new Error("Meta CAPI HTTP " + r.status + " body: " + JSON.stringify(r.json || {}).slice(0, 300));
+    }
+    entry.status = "sent";
+    entry.sent_at = Date.now();
+    delete entry.last_error;
+  } catch (e) {
+    entry.status = "pending";
+    entry.attempts = (Number(entry.attempts) || 0) + 1;
+    entry.last_error = String((e && e.message) || e).slice(0, 200);
+  }
+  await kvSet(key, entry, META_OUTBOX_TTL);
   return entry;
 }
 
@@ -198,23 +255,31 @@ export default async function handler(req, res) {
       });
     }
 
-    // Drain mode.
-    const summary = { popped: 0, sent: 0, failed: 0, expired: 0, skipped: 0 };
+    // Drain mode — BI-CHANNEL (see header).
+    const summary = { popped: 0, sent: 0, failed: 0, expired: 0, skipped: 0, requeued: 0 };
     const details = [];
     while (summary.popped < max && Date.now() - startedAt < budgetMs) {
-      const id = await kvLPop(GA4_QUEUE_KEY);
+      const id = await kvLPop(OUTBOX_QUEUE_KEY);
       if (!id) break;
       summary.popped += 1;
-      const entry = await kvGet(`ga4:${id}`);
-      if (!entry || entry.status === "sent" || entry.status === "expired") { summary.skipped += 1; continue; }
-      const out = await trySend(entry);
-      if (out.status === "sent") summary.sent += 1;
-      else if (out.status === "expired") summary.expired += 1;
-      else { summary.failed += 1; await kvRPush(GA4_QUEUE_KEY, String(id)); }
-      details.push({ session: out.session_id, status: out.status, attempts: out.attempts, last_error: out.last_error || null });
+      let stillPending = false;
+      let touched = false;
+      for (const channel of OUTBOX_CHANNELS) {
+        const entry = await kvGet(`${channel}:${id}`);
+        if (!entry || !entry.session_id) continue;
+        if (entry.status === "sent" || entry.status === "expired") continue;
+        touched = true;
+        const out = channel === "ga4" ? await trySend(entry) : await metaTrySend(entry);
+        if (out.status === "sent") summary.sent += 1;
+        else if (out.status === "expired") summary.expired += 1;
+        else { summary.failed += 1; stillPending = true; }
+        details.push({ channel, session: out.session_id, status: out.status, attempts: out.attempts, last_error: out.last_error || null });
+      }
+      if (!touched) summary.skipped += 1;
+      if (stillPending) { summary.requeued += 1; await kvRPush(OUTBOX_QUEUE_KEY, String(id)); }
     }
     return res.status(200).json({
-      mode: "drain", ...summary, queueLength: await kvLLen(GA4_QUEUE_KEY),
+      mode: "drain", ...summary, queueLength: await kvLLen(OUTBOX_QUEUE_KEY),
       elapsedMs: Date.now() - startedAt, details,
     });
   } catch (e) {
