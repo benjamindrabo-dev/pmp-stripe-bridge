@@ -790,6 +790,14 @@ export default async function handler(req, res) {
           try { reconciledCart = await kvGet(key); }
           catch (e) { console.error("GA4 reconciliation: cart read failed for", key, String((e && e.message) || e)); }
 
+          // Failing to PERSIST a tracking intention must fail the webhook.
+          // Writing done: anyway would make Stripe's redelivery answer
+          // `duplicate: true` and the conversion would be lost for good.
+          // Deliberate abstention (a `null` return: no real ga_client_id, or
+          // Meta credentials not configured) is a SUCCESS, not a failure, and
+          // never lands here.
+          const reconcilePersistFailures = [];
+
           try {
             const existingGa4 = await kvGet(`ga4:${session.id}`);
             if (existingGa4 && existingGa4.session_id) {
@@ -831,8 +839,11 @@ export default async function handler(req, res) {
               }
             }
           } catch (e) {
-            // A Redis outage must not stop the order from being marked done.
-            console.error("GA4 reconciliation outbox persist failed — POTENTIAL LOST CONVERSION for", session.id, e);
+            // Technical failure (Redis/Upstash): refuse to write done: and let
+            // Stripe redeliver. The order already exists in Shopify and
+            // findShopifyOrder() brings us straight back here.
+            reconcilePersistFailures.push("ga4: " + String((e && e.message) || e));
+            console.error("GA4 reconciliation outbox persist FAILED for", session.id, e);
           }
 
           // Same treatment for Meta CAPI, under the same conditions: BEFORE the
@@ -864,7 +875,21 @@ export default async function handler(req, res) {
               },
             });
           } catch (e) {
-            console.error("Meta reconciliation outbox persist failed — POTENTIAL LOST CONVERSION for", session.id, e);
+            reconcilePersistFailures.push("meta: " + String((e && e.message) || e));
+            console.error("Meta reconciliation outbox persist FAILED for", session.id, e);
+          }
+
+          // Exit BEFORE kvSet(doneKey) and BEFORE the cart kvDel below: the
+          // cart must survive so the redelivery can rebuild the payloads.
+          if (reconcilePersistFailures.length) {
+            try { await kvRelease(claimKey, claimToken); } catch (releaseError) { console.error("lease release failed", releaseError); }
+            console.error("tracking outbox persist failed on the reconciliation path for", session.id, "— order exists in Shopify, asking Stripe to redeliver:", reconcilePersistFailures.join(" | "));
+            return res.status(500).json({
+              error: "order exists but tracking persistence failed, retry",
+              order_created: true,
+              tracking_persisted: false,
+              detail: reconcilePersistFailures.join(" | "),
+            });
           }
 
           await kvSet(doneKey, { order_id: existingOrder.legacyResourceId || existingOrder.id, reconciled: true }, 7776000);
@@ -978,6 +1003,11 @@ export default async function handler(req, res) {
         try { ga4Items = buildGa4Items(cart, createdOrder, (discount && discount.cents) || 0); }
         catch (e) { console.error("GA4 items build failed", e); ga4Items = []; }
 
+        // Same rule as the reconciliation path: a persist failure fails the
+        // webhook (no done:, no cart deletion, 500) so Stripe redelivers; a
+        // deliberate abstention returning null is a success.
+        const persistFailures = [];
+
         let ga4Entry = null;
         try {
           ga4Entry = await ga4PersistIntent({
@@ -997,9 +1027,11 @@ export default async function handler(req, res) {
             timestampMicros: ga4TimestampMicros(event),
           });
         } catch (e) {
-          // A Redis outage must not stop the order from being marked done —
-          // but it IS a potential lost conversion, so say it loudly.
-          console.error("GA4 outbox persist failed — POTENTIAL LOST CONVERSION for", session.id, e);
+          // Technical failure (Redis/Upstash): refuse to write done:. The order
+          // is already durable in Shopify, so the redelivery is reconciled and
+          // outboxEnqueue is idempotent — no duplicate order, no duplicate entry.
+          persistFailures.push("ga4: " + String((e && e.message) || e));
+          console.error("GA4 outbox persist FAILED for", session.id, e);
         }
 
         // Meta CAPI intention persisted BEFORE done:<session>, exactly like
@@ -1023,7 +1055,21 @@ export default async function handler(req, res) {
             orderNumber: createdOrder && createdOrder.order_number,
           });
         } catch (e) {
-          console.error("Meta outbox persist failed — POTENTIAL LOST CONVERSION for", session.id, e);
+          persistFailures.push("meta: " + String((e && e.message) || e));
+          console.error("Meta outbox persist FAILED for", session.id, e);
+        }
+
+        // Exit BEFORE kvSet(doneKey) and BEFORE the cart kvDel further down:
+        // the cart must survive so the redelivery can rebuild the payloads.
+        if (persistFailures.length) {
+          try { await kvRelease(claimKey, claimToken); } catch (releaseError) { console.error("lease release failed", releaseError); }
+          console.error("tracking outbox persist failed for", session.id, "— order is created in Shopify, asking Stripe to redeliver:", persistFailures.join(" | "));
+          return res.status(500).json({
+            error: "order created but tracking persistence failed, retry",
+            order_created: true,
+            tracking_persisted: false,
+            detail: persistFailures.join(" | "),
+          });
         }
 
         // Completion is durable before analytics. If this write fails, Stripe
