@@ -361,11 +361,23 @@ async function ga4Post(payload, { validate = false } = {}) {
 }
 
 // ---- GA4 outbox --------------------------------------------------------
-// sendGa4Purchase is called AFTER done:<session> is written, so a GA4 failure
-// can never be retried by Stripe. The outbox owns tracking idempotence:
+// The intention is persisted BEFORE done:<session> is written (so a crash
+// there makes Stripe redeliver and rebuild it), and only ATTEMPTED afterwards,
+// so a GA4 send failure can never be retried by Stripe. The outbox owns
+// tracking idempotence:
 // ga4:<session> holds the ready-to-post payload, ga4:queue lists the pending
 // ids (a LIST, never SCAN). Nothing here may affect the order.
 async function ga4Enqueue(sessionId, payload) {
+  // IDEMPOTENT. The intention is now persisted BEFORE done:<session>, so a
+  // crash between the two makes Stripe redeliver and reach this code again.
+  // An existing entry is therefore never rewritten (a `sent` entry must never
+  // fall back to `pending`) and never pushed a second time onto ga4:queue.
+  const key = `ga4:${sessionId}`;
+  const existing = await kvGet(key);
+  if (existing && existing.session_id) {
+    console.log("GA4 outbox entry already present for", sessionId, "status:", existing.status, "— not re-enqueued");
+    return existing;
+  }
   const entry = {
     session_id: String(sessionId),
     payload,
@@ -373,7 +385,7 @@ async function ga4Enqueue(sessionId, payload) {
     attempts: 0,
     first_seen_at: Date.now(),
   };
-  await kvSet(`ga4:${sessionId}`, entry, GA4_OUTBOX_TTL);
+  await kvSet(key, entry, GA4_OUTBOX_TTL);
   await kvRPush(GA4_QUEUE_KEY, String(sessionId));
   return entry;
 }
@@ -430,8 +442,12 @@ async function ga4Drain({ max = 3, budgetMs = 4000 } = {}) {
   return summary;
 }
 
-// Persist the intention FIRST, then try once. Never throws.
-async function sendGa4Purchase(opts) {
+// Persist the purchase intention in the outbox — and nothing else. Sending is
+// a separate step (ga4TrySend), deliberately: the durability of the intention
+// must be acquired BEFORE done:<session> is written, while the delivery attempt
+// belongs after the lease is released. Returns the outbox entry, or null when
+// there is no real client_id.
+async function ga4PersistIntent(opts) {
   const payload = buildGa4Payload(opts);
   if (!payload) {
     console.error("GA4 MP SKIPPED for", opts && opts.sessionId, ": no ga_client_id (cart + session.metadata both empty)");
@@ -442,8 +458,7 @@ async function sendGa4Purchase(opts) {
     "value:", payload.events[0].params.value,
     "charged:", opts.chargedCents == null ? "n/a" : (Number(opts.chargedCents) || 0) / 100
   );
-  const entry = await ga4Enqueue(opts.sessionId, payload);
-  return ga4TrySend(entry);
+  return ga4Enqueue(opts.sessionId, payload);
 }
 
 function cleanAddress(a) {
@@ -644,6 +659,61 @@ export default async function handler(req, res) {
           return res.status(500).json({ error: "reconciliation failed, retry" });
         }
         if (existingOrder) {
+          // The order exists, but the delivery that created it may have died
+          // before persisting the GA4 intention. Rebuild it here — BEFORE the
+          // done marker and before the cart is deleted — otherwise this path
+          // acknowledges the webhook and the conversion is lost for good.
+          // The cart may already have been deleted (or expired) on this path:
+          // read it first, and fall back on session.metadata for the GA4 ids.
+          let reconciledCart = null;
+          try { reconciledCart = await kvGet(key); }
+          catch (e) { console.error("GA4 reconciliation: cart read failed for", key, String((e && e.message) || e)); }
+
+          try {
+            const existingGa4 = await kvGet(`ga4:${session.id}`);
+            if (existingGa4 && existingGa4.session_id) {
+              console.log("GA4 reconciliation: outbox entry already present for", session.id, "status:", existingGa4.status);
+            } else {
+              const reconciledClientId =
+                (reconciledCart && reconciledCart.ga_client_id) ||
+                (session.metadata && session.metadata.ga_client_id) || null;
+              if (!reconciledClientId) {
+                // A fabricated client_id would create a parasitic
+                // direct/(none) user: no entry at all is the lesser evil.
+                console.error("GA4 reconciliation SKIPPED for", session.id, ": no ga_client_id (cart + session.metadata both empty)");
+              } else {
+                // Without the cart there are no lines: the purchase is queued
+                // WITHOUT items (value 0) rather than not queued at all.
+                // existingOrder carries no line_items, so item_name is simply
+                // omitted — never invented. No promo amount was fetched on this
+                // path: discountCents stays 0, so `value` is the GROSS items
+                // total, which may exceed the amount actually charged when a
+                // Stripe promotion code was used. Logged below, never guessed.
+                let reconciledItems = [];
+                if (reconciledCart) {
+                  try { reconciledItems = buildGa4Items(reconciledCart, null, 0); }
+                  catch (e) { console.error("GA4 reconciliation items build failed", e); reconciledItems = []; }
+                } else {
+                  console.warn("GA4 reconciliation for", session.id, ": cart unavailable — queuing purchase WITHOUT items (value 0)");
+                }
+                await ga4PersistIntent({
+                  sessionId: session.id,
+                  itemsValueCents: ga4ItemsValueCents(reconciledItems),
+                  chargedCents: session.amount_total,
+                  currency: session.currency || (reconciledCart && reconciledCart.currency),
+                  gaClientId: reconciledClientId,
+                  gaSessionId: (reconciledCart && reconciledCart.ga_session_id) || (session.metadata && session.metadata.ga_session_id) || null,
+                  gaSessionNumber: (reconciledCart && reconciledCart.ga_session_number) || (session.metadata && session.metadata.ga_session_number) || null,
+                  items: reconciledItems,
+                  timestampMicros: ga4TimestampMicros(event),
+                });
+              }
+            }
+          } catch (e) {
+            // A Redis outage must not stop the order from being marked done.
+            console.error("GA4 reconciliation outbox persist failed — POTENTIAL LOST CONVERSION for", session.id, e);
+          }
+
           await kvSet(doneKey, { order_id: existingOrder.legacyResourceId || existingOrder.id, reconciled: true }, 7776000);
           await kvRelease(claimKey, claimToken);
           try { await kvDel(key); } catch (e) { console.error("cart cleanup failed for", key, e); }
@@ -741,6 +811,44 @@ export default async function handler(req, res) {
           }
         }
 
+        // GA4 intention persisted BEFORE done:<session>. If the process dies
+        // between the two, done: does not exist yet: Stripe redelivers, the
+        // reconciliation path above finds the order and creates the outbox
+        // entry. ga4Enqueue is idempotent, so a crash between the enqueue and
+        // the done write cannot produce a second queue entry.
+        // item_name is matched by variant_id against the Shopify order lines,
+        // and omitted when the match fails (never invented). The Stripe promo
+        // discount is spread over the paying lines so `price` and `value` are
+        // the amounts actually paid. Built defensively: a GA4 failure must
+        // never touch the order nor the webhook response.
+        let ga4Items = [];
+        try { ga4Items = buildGa4Items(cart, createdOrder, (discount && discount.cents) || 0); }
+        catch (e) { console.error("GA4 items build failed", e); ga4Items = []; }
+
+        let ga4Entry = null;
+        try {
+          ga4Entry = await ga4PersistIntent({
+            sessionId: session.id,
+            // GA4 value = SUM(net price x quantity) of items, shipping and
+            // tax EXCLUDED, and net of any Stripe promotion code (spread over
+            // the paying lines). session.amount_total stays available and is
+            // logged, but is no longer sent as `value`.
+            itemsValueCents: ga4ItemsValueCents(ga4Items),
+            chargedCents: session.amount_total,
+            currency: session.currency || cart.currency,
+            // Redis may have expired; Stripe metadata is durable, so fall back on it.
+            gaClientId: (cart && cart.ga_client_id) || (session.metadata && session.metadata.ga_client_id) || null,
+            gaSessionId: (cart && cart.ga_session_id) || (session.metadata && session.metadata.ga_session_id) || null,
+            gaSessionNumber: (cart && cart.ga_session_number) || (session.metadata && session.metadata.ga_session_number) || null,
+            items: ga4Items,
+            timestampMicros: ga4TimestampMicros(event),
+          });
+        } catch (e) {
+          // A Redis outage must not stop the order from being marked done —
+          // but it IS a potential lost conversion, so say it loudly.
+          console.error("GA4 outbox persist failed — POTENTIAL LOST CONVERSION for", session.id, e);
+        }
+
         // Completion is durable before analytics. If this write fails, Stripe
         // retries and Shopify reconciliation prevents a duplicate order.
         await kvSet(doneKey, { order_id: createdOrder && createdOrder.id, completed_at: Date.now() }, 7776000);
@@ -762,35 +870,12 @@ export default async function handler(req, res) {
           });
         } catch (e) { console.error("Meta CAPI error", e); }
 
-        // Server-side ad tracking (never blocks the order; pixel is the backup).
+        // Delivery attempt only (never blocks the order; pixel is the backup).
         // done:<session> is already durable above, so Stripe will never retry a
-        // GA4 failure: the ga4:<session> outbox carries that retry instead.
-        // item_name is matched by variant_id against the Shopify order lines,
-        // and omitted when the match fails (never invented). The Stripe promo
-        // discount is spread over the paying lines so `price` and `value` are
-        // the amounts actually paid. Built defensively: a GA4 failure must
-        // never touch the order.
-        let ga4Items = [];
-        try { ga4Items = buildGa4Items(cart, createdOrder, (discount && discount.cents) || 0); }
-        catch (e) { console.error("GA4 items build failed", e); ga4Items = []; }
-
+        // GA4 failure: the ga4:<session> outbox persisted BEFORE the done marker
+        // carries that retry instead.
         try {
-          await sendGa4Purchase({
-            sessionId: session.id,
-            // GA4 value = SUM(net price x quantity) of items, shipping and
-            // tax EXCLUDED, and net of any Stripe promotion code (spread over
-            // the paying lines). session.amount_total stays available and is
-            // logged, but is no longer sent as `value`.
-            itemsValueCents: ga4ItemsValueCents(ga4Items),
-            chargedCents: session.amount_total,
-            currency: session.currency || cart.currency,
-            // Redis may have expired; Stripe metadata is durable, so fall back on it.
-            gaClientId: (cart && cart.ga_client_id) || (session.metadata && session.metadata.ga_client_id) || null,
-            gaSessionId: (cart && cart.ga_session_id) || (session.metadata && session.metadata.ga_session_id) || null,
-            gaSessionNumber: (cart && cart.ga_session_number) || (session.metadata && session.metadata.ga_session_number) || null,
-            items: ga4Items,
-            timestampMicros: ga4TimestampMicros(event),
-          });
+          if (ga4Entry && ga4Entry.status !== "sent" && ga4Entry.status !== "expired") await ga4TrySend(ga4Entry);
         } catch (e) { console.error("GA4 MP error", e); }
 
         // Opportunistic outbox drain: at most 3 entries, hard time budget, and
