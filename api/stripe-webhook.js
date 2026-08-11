@@ -172,21 +172,77 @@ async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart
 // (the API secret is a SECRET — set it in Vercel → Environment Variables,
 // never in the code/repo). Note: the Measurement Protocol answers HTTP 204
 // even for an invalid payload, so we log exactly what we send and expose a
-// separate ENFORCE_RECOMMENDATIONS validator in /api/ga4-retry?validate=1.
+// separate validator (validation_behavior = ENFORCE_RECOMMENDATIONS, sent ONLY
+// to /debug/mp/collect) in /api/ga4-retry?validate=1.
 const GA4_OUTBOX_TTL = 345600;              // 4 days > GA4's 72h backdating window
 const GA4_QUEUE_KEY = "ga4:queue";          // Redis LIST of session ids (no SCAN)
 const GA4_MAX_AGE_MS = 72 * 3600 * 1000;    // GA4 drops events backdated > 72h
 
-// Payment instant in MICROseconds. Retries must reuse this value, so it is
-// stored in the outbox entry: a retry two hours later must not be dated two
-// hours later.
-function ga4TimestampMicros(session) {
-  const st = session && session.status_transitions;
-  const seconds =
-    Number(st && (st.paid_at || st.completed_at)) ||
-    Number(session && session.created) ||
-    0;
-  return seconds > 0 ? seconds * 1e6 : Date.now() * 1000;
+// Event instant in MICROseconds, taken from the Stripe Event object's
+// `created` (Unix seconds) — the moment the payment event was emitted. The
+// Checkout Session carries no payment-transition timestamps, and
+// session.created is only the moment the checkout was opened, which for
+// delayed payment methods can be days before the money actually arrives.
+// Retries must reuse this value, so it is stored in the outbox entry: a retry
+// two hours later must not be dated two hours later.
+// Never throws: falls back on Date.now() when `created` is missing or absurd.
+const GA4_MIN_PLAUSIBLE_SECONDS = 1420070400; // 2015-01-01, sanity floor
+function ga4TimestampMicros(event) {
+  const nowMicros = Date.now() * 1000;
+  const seconds = Number(event && event.created);
+  if (!Number.isFinite(seconds) || seconds < GA4_MIN_PLAUSIBLE_SECONDS) return nowMicros;
+  const micros = Math.round(seconds * 1e6);
+  // More than 24h in the future = clock nonsense; prefer our own clock.
+  if (micros > nowMicros + 24 * 3600 * 1e6) return nowMicros;
+  return micros;
+}
+
+// Spreads an order-level Stripe discount (in integer cents) across the PAYING
+// lines only, pro rata of each line subtotal (price_cents x quantity).
+// Free BXGY lines (price_cents <= 0) get no share and stay at price 0.
+//
+// Everything is done in integer cents with the largest-remainder method, so the
+// allocated shares sum EXACTLY to the discount — no stray cent appears or
+// vanishes. A discount greater than or equal to the paying subtotal is clamped
+// to that subtotal, so a net price can never go negative.
+//
+// Returns an array of integer cents, aligned index-by-index with `items`.
+// Pure function, never throws: any unusable input yields all-zero shares.
+function allocateDiscountCents(items, discountCents) {
+  const list = Array.isArray(items) ? items : [];
+  const shares = new Array(list.length).fill(0);
+  const total = Math.round(Number(discountCents) || 0);
+  if (!(total > 0)) return shares;
+
+  const subtotals = list.map((it) => {
+    const price = Math.round(Number(it && it.price_cents) || 0);
+    const qty = Math.max(1, Math.round(Number(it && it.quantity) || 1));
+    return price > 0 ? price * qty : 0;
+  });
+  const payable = subtotals.reduce((s, v) => s + v, 0);
+  if (payable <= 0) return shares;
+
+  // Clamp: never discount more than what is actually payable.
+  const toSpread = Math.min(total, payable);
+
+  const remainders = [];
+  let assigned = 0;
+  for (let i = 0; i < list.length; i++) {
+    if (subtotals[i] <= 0) continue;
+    const exact = (toSpread * subtotals[i]) / payable;
+    const floor = Math.floor(exact);
+    shares[i] = floor;
+    assigned += floor;
+    remainders.push({ i, frac: exact - floor, sub: subtotals[i] });
+  }
+  // Largest remainder; ties broken by the larger subtotal, then the lower index.
+  remainders.sort((a, b) => (b.frac - a.frac) || (b.sub - a.sub) || (a.i - b.i));
+  let left = toSpread - assigned;
+  for (let k = 0; k < remainders.length && left > 0; k++) {
+    shares[remainders[k].i] += 1;
+    left -= 1;
+  }
+  return shares;
 }
 
 // GA4 ecommerce requires `items`, and each item requires item_id or item_name.
@@ -195,7 +251,18 @@ function ga4TimestampMicros(session) {
 // is unavailable (ambiguous recovery path) — item_name is OMITTED rather than
 // invented. Free BXGY lines are kept as-is with price 0: that is the correct
 // ecommerce representation, they are neither merged nor dropped.
-function buildGa4Items(cart, createdOrder) {
+//
+// `price` is the NET unit price actually paid: (line subtotal - allocated
+// discount share) / quantity / 100. Google requires the post-discount price,
+// and an order-level discount to be spread over the items. Rounding: the unit
+// price is rounded half-up to 2 decimals (Math.round on hundredths), the
+// currency's smallest unit. With quantity > 1 and a share that is not divisible
+// by the quantity, price x quantity may differ from the exact net line total by
+// less than one cent per line; the cents themselves are never lost, only the
+// per-unit display is rounded.
+// When discountCents is 0/absent, shares are all 0 and the result is byte-for-
+// byte what it was before this change.
+function buildGa4Items(cart, createdOrder, discountCents) {
   const lines = (createdOrder && Array.isArray(createdOrder.line_items)) ? createdOrder.line_items : [];
   const titleByVariant = new Map();
   for (const li of lines) {
@@ -204,15 +271,32 @@ function buildGa4Items(cart, createdOrder) {
     const vid = String(li.variant_id);
     if (title && !titleByVariant.has(vid)) titleByVariant.set(vid, String(title));
   }
-  return ((cart && cart.items) || []).map((it) => {
+  const cartItems = (cart && cart.items) || [];
+  const shares = allocateDiscountCents(cartItems, discountCents);
+  return cartItems.map((it, idx) => {
     const id = String(it.variant_id);
     const item = { item_id: id };
     const name = titleByVariant.get(id);
     if (name) item.item_name = name;
-    item.price = (Number(it.price_cents) || 0) / 100;
-    item.quantity = Number(it.quantity) || 1;
+    const priceCents = Math.round(Number(it.price_cents) || 0);
+    const quantity = Number(it.quantity) || 1;
+    const qty = Math.max(1, Math.round(quantity));
+    const gross = priceCents > 0 ? priceCents * qty : 0;
+    const net = Math.max(0, gross - (Number(shares[idx]) || 0));
+    item.price = priceCents > 0 ? Math.round((net / qty)) / 100 : (priceCents || 0) / 100;
+    item.quantity = quantity;
     return item;
   });
+}
+
+// GA4 purchase.value = SUM(price x quantity) over the items, shipping and tax
+// EXCLUDED. Computed from the very items we send, so value and items always
+// agree — including after a discount has been spread over them.
+function ga4ItemsValueCents(items) {
+  return (Array.isArray(items) ? items : []).reduce(
+    (sum, it) => sum + Math.round((Number(it && it.price) || 0) * 100) * (Math.max(1, Math.round(Number(it && it.quantity) || 1))),
+    0
+  );
 }
 
 // Builds the exact body posted to the Measurement Protocol. Returns null when
@@ -230,11 +314,10 @@ function buildGa4Payload({ sessionId, itemsValueCents, currency, gaClientId, gaS
     // therefore not used here; it is only logged for traceability.
     value: Math.round(Number(itemsValueCents) || 0) / 100,
     currency: String(currency).toUpperCase(),
-    // KEPT FOR NOW, pending arbitration: whether engagement_time_msec belongs on
-    // a server-side purchase must be decided by the validationMessages returned
-    // by /api/ga4-retry?validate=1 (validationBehavior ENFORCE_RECOMMENDATIONS),
-    // not by opinion. Do not remove it before that verdict.
-    engagement_time_msec: 1,
+    // No engagement-time parameter is sent: it is not a session-attribution
+    // condition (those are session_id, delivery within 24h of the session
+    // start, and a timestamp_micros inside that session). A hardcoded 1 ms
+    // would be an invented duration, and strict validation checks only types.
     items: Array.isArray(items) ? items : [],
   };
   // Only include session fields when they exist: GA4 treats an explicit null
@@ -263,7 +346,10 @@ async function ga4Post(payload, { validate = false } = {}) {
   const base = validate
     ? "https://www.google-analytics.com/debug/mp/collect"
     : "https://www.google-analytics.com/mp/collect";
-  const body = validate ? { ...payload, validationBehavior: "ENFORCE_RECOMMENDATIONS" } : payload;
+  // validation_behavior (underscore) is the documented field name, and Google
+  // asks that it NOT be sent in production — it is therefore attached only on
+  // the /debug/mp/collect path, never on /mp/collect.
+  const body = validate ? { ...payload, validation_behavior: "ENFORCE_RECOMMENDATIONS" } : payload;
   const r = await fetchWithTimeout(
     `${base}?measurement_id=${encodeURIComponent(measurementId)}&api_secret=${encodeURIComponent(apiSecret)}`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
@@ -294,7 +380,9 @@ async function ga4Enqueue(sessionId, payload) {
 
 // One delivery attempt for an outbox entry; always persists the new state.
 // Past the 72h backdating limit the entry is marked `expired` instead of being
-// retried forever.
+// retried forever. The age is measured from payload.timestamp_micros, i.e. the
+// Stripe Event instant, so a delayed payment confirmed days after checkout is
+// dated at its confirmation and is not expired on sight.
 async function ga4TrySend(entry) {
   const key = `ga4:${entry.session_id}`;
   const micros = Number(entry.payload && entry.payload.timestamp_micros) || 0;
@@ -677,24 +765,31 @@ export default async function handler(req, res) {
         // Server-side ad tracking (never blocks the order; pixel is the backup).
         // done:<session> is already durable above, so Stripe will never retry a
         // GA4 failure: the ga4:<session> outbox carries that retry instead.
+        // item_name is matched by variant_id against the Shopify order lines,
+        // and omitted when the match fails (never invented). The Stripe promo
+        // discount is spread over the paying lines so `price` and `value` are
+        // the amounts actually paid. Built defensively: a GA4 failure must
+        // never touch the order.
+        let ga4Items = [];
+        try { ga4Items = buildGa4Items(cart, createdOrder, (discount && discount.cents) || 0); }
+        catch (e) { console.error("GA4 items build failed", e); ga4Items = []; }
+
         try {
           await sendGa4Purchase({
             sessionId: session.id,
-            // GA4 value = SUM(price x quantity) of items, shipping and tax
-            // EXCLUDED. cartTotal is exactly that sum (the same one used to
-            // derive shippingCents). session.amount_total stays available and
-            // is logged, but is no longer sent as `value`.
-            itemsValueCents: cartTotal,
+            // GA4 value = SUM(net price x quantity) of items, shipping and
+            // tax EXCLUDED, and net of any Stripe promotion code (spread over
+            // the paying lines). session.amount_total stays available and is
+            // logged, but is no longer sent as `value`.
+            itemsValueCents: ga4ItemsValueCents(ga4Items),
             chargedCents: session.amount_total,
             currency: session.currency || cart.currency,
             // Redis may have expired; Stripe metadata is durable, so fall back on it.
             gaClientId: (cart && cart.ga_client_id) || (session.metadata && session.metadata.ga_client_id) || null,
             gaSessionId: (cart && cart.ga_session_id) || (session.metadata && session.metadata.ga_session_id) || null,
             gaSessionNumber: (cart && cart.ga_session_number) || (session.metadata && session.metadata.ga_session_number) || null,
-            // item_name is matched by variant_id against the Shopify order
-            // lines, and omitted when the match fails (never invented).
-            items: buildGa4Items(cart, createdOrder),
-            timestampMicros: ga4TimestampMicros(session),
+            items: ga4Items,
+            timestampMicros: ga4TimestampMicros(event),
           });
         } catch (e) { console.error("GA4 MP error", e); }
 
