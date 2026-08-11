@@ -161,6 +161,52 @@ async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart
   }
 }
 
+// ---- GA4 Measurement Protocol (server-side purchase tracking) ----
+// The webhook is the SINGLE source for the GA4 `purchase` event: the browser
+// tag is removed, so a paid order converts even if the shopper never loads the
+// thank-you page. Requires env vars GA4_MEASUREMENT_ID and GA4_API_SECRET
+// (the API secret is a SECRET — set it in Vercel → Environment Variables,
+// never in the code/repo). Note: the Measurement Protocol answers HTTP 204
+// even for an invalid payload, so we log exactly what we send.
+async function sendGa4Purchase({ sessionId, valueCents, currency, gaClientId, gaSessionId, gaSessionNumber }) {
+  const measurementId = process.env.GA4_MEASUREMENT_ID;
+  const apiSecret = process.env.GA4_API_SECRET;
+  if (!measurementId || !apiSecret) { console.error("GA4 MP SKIPPED: GA4_MEASUREMENT_ID / GA4_API_SECRET not set in Vercel"); return; }
+
+  // Deliberate choice: with no real client_id we send NOTHING. A fabricated id
+  // would create a parasitic direct/(none) user and corrupt attribution —
+  // zero events is better than one badly attributed event.
+  if (!gaClientId) { console.error("GA4 MP SKIPPED for", sessionId, ": no ga_client_id (cart + session.metadata both empty)"); return; }
+
+  const params = {
+    // transaction_id must be the Stripe session id (cs_...): same key the
+    // browser tag used and the same value as the Meta CAPI event_id.
+    transaction_id: sessionId,
+    value: (Number(valueCents) || 0) / 100,
+    currency: String(currency).toUpperCase(),
+    // Required for GA4 to attach the event to the originating session.
+    engagement_time_msec: 1,
+  };
+  // Only include session fields when they exist: GA4 treats an explicit null
+  // as a value.
+  if (gaSessionId) params.session_id = String(gaSessionId);
+  if (gaSessionNumber) params.session_number = String(gaSessionNumber);
+
+  const body = {
+    client_id: String(gaClientId),
+    non_personalized_ads: false,
+    events: [{ name: "purchase", params }],
+  };
+
+  const r = await fetchWithTimeout(
+    `https://www.google-analytics.com/mp/collect?measurement_id=${encodeURIComponent(measurementId)}&api_secret=${encodeURIComponent(apiSecret)}`,
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
+    5000
+  );
+  // GA4 returns 204 even on an invalid payload: log the payload, not just status.
+  console.log("GA4 MP sent:", sessionId, "status:", r.status, "payload:", JSON.stringify(body).slice(0, 500));
+}
+
 function cleanAddress(a) {
   if (!a || !a.address1) return undefined;
   return {
@@ -476,6 +522,19 @@ export default async function handler(req, res) {
             orderNumber: createdOrder && createdOrder.order_number,
           });
         } catch (e) { console.error("Meta CAPI error", e); }
+
+        // Server-side ad tracking (never blocks the order; pixel is the backup).
+        try {
+          await sendGa4Purchase({
+            sessionId: session.id,
+            valueCents: session.amount_total,
+            currency: session.currency || cart.currency,
+            // Redis may have expired; Stripe metadata is durable, so fall back on it.
+            gaClientId: (cart && cart.ga_client_id) || (session.metadata && session.metadata.ga_client_id) || null,
+            gaSessionId: (cart && cart.ga_session_id) || (session.metadata && session.metadata.ga_session_id) || null,
+            gaSessionNumber: (cart && cart.ga_session_number) || (session.metadata && session.metadata.ga_session_number) || null,
+          });
+        } catch (e) { console.error("GA4 MP error", e); }
 
         try { await kvDel(key); } catch (e) { console.error("cart cleanup failed for", key, e); }
       }
