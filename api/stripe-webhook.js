@@ -54,6 +54,10 @@ async function kvSet(key, value, ttlSeconds) {
   if (result !== "OK") throw new Error("Upstash SET was not acknowledged");
 }
 async function kvDel(key) { await redisCommand(["DEL", key]); }
+// List helpers for the GA4 outbox queue: enumerating pending entries with a
+// LIST is O(1) per read, unlike SCAN which walks the whole keyspace.
+async function kvRPush(key, member) { return redisCommand(["RPUSH", key, String(member)]); }
+async function kvLPop(key) { return redisCommand(["LPOP", key]); }
 
 // A short processing lease is not a completion marker. Concurrent deliveries
 // receive 500 so Stripe retries; only done:<session> is acknowledged as complete.
@@ -167,44 +171,191 @@ async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart
 // thank-you page. Requires env vars GA4_MEASUREMENT_ID and GA4_API_SECRET
 // (the API secret is a SECRET — set it in Vercel → Environment Variables,
 // never in the code/repo). Note: the Measurement Protocol answers HTTP 204
-// even for an invalid payload, so we log exactly what we send.
-async function sendGa4Purchase({ sessionId, valueCents, currency, gaClientId, gaSessionId, gaSessionNumber }) {
-  const measurementId = process.env.GA4_MEASUREMENT_ID;
-  const apiSecret = process.env.GA4_API_SECRET;
-  if (!measurementId || !apiSecret) { console.error("GA4 MP SKIPPED: GA4_MEASUREMENT_ID / GA4_API_SECRET not set in Vercel"); return; }
+// even for an invalid payload, so we log exactly what we send and expose a
+// separate ENFORCE_RECOMMENDATIONS validator in /api/ga4-retry?validate=1.
+const GA4_OUTBOX_TTL = 345600;              // 4 days > GA4's 72h backdating window
+const GA4_QUEUE_KEY = "ga4:queue";          // Redis LIST of session ids (no SCAN)
+const GA4_MAX_AGE_MS = 72 * 3600 * 1000;    // GA4 drops events backdated > 72h
 
-  // Deliberate choice: with no real client_id we send NOTHING. A fabricated id
-  // would create a parasitic direct/(none) user and corrupt attribution —
-  // zero events is better than one badly attributed event.
-  if (!gaClientId) { console.error("GA4 MP SKIPPED for", sessionId, ": no ga_client_id (cart + session.metadata both empty)"); return; }
+// Payment instant in MICROseconds. Retries must reuse this value, so it is
+// stored in the outbox entry: a retry two hours later must not be dated two
+// hours later.
+function ga4TimestampMicros(session) {
+  const st = session && session.status_transitions;
+  const seconds =
+    Number(st && (st.paid_at || st.completed_at)) ||
+    Number(session && session.created) ||
+    0;
+  return seconds > 0 ? seconds * 1e6 : Date.now() * 1000;
+}
 
+// GA4 ecommerce requires `items`, and each item requires item_id or item_name.
+// item_id is the socle (always present). item_name is matched BY variant_id
+// against the Shopify order lines; when the match fails — or when createdOrder
+// is unavailable (ambiguous recovery path) — item_name is OMITTED rather than
+// invented. Free BXGY lines are kept as-is with price 0: that is the correct
+// ecommerce representation, they are neither merged nor dropped.
+function buildGa4Items(cart, createdOrder) {
+  const lines = (createdOrder && Array.isArray(createdOrder.line_items)) ? createdOrder.line_items : [];
+  const titleByVariant = new Map();
+  for (const li of lines) {
+    if (!li || li.variant_id == null) continue;
+    const title = li.title || li.name;
+    const vid = String(li.variant_id);
+    if (title && !titleByVariant.has(vid)) titleByVariant.set(vid, String(title));
+  }
+  return ((cart && cart.items) || []).map((it) => {
+    const id = String(it.variant_id);
+    const item = { item_id: id };
+    const name = titleByVariant.get(id);
+    if (name) item.item_name = name;
+    item.price = (Number(it.price_cents) || 0) / 100;
+    item.quantity = Number(it.quantity) || 1;
+    return item;
+  });
+}
+
+// Builds the exact body posted to the Measurement Protocol. Returns null when
+// there is no real client_id: a fabricated id would create a parasitic
+// direct/(none) user and corrupt attribution — zero events beats one badly
+// attributed event.
+function buildGa4Payload({ sessionId, itemsValueCents, currency, gaClientId, gaSessionId, gaSessionNumber, items, timestampMicros }) {
+  if (!gaClientId) return null;
   const params = {
     // transaction_id must be the Stripe session id (cs_...): same key the
     // browser tag used and the same value as the Meta CAPI event_id.
     transaction_id: sessionId,
-    value: (Number(valueCents) || 0) / 100,
+    // GA4 defines purchase.value as SUM(price x quantity) of the items,
+    // EXCLUDING shipping and tax. session.amount_total (the charged amount) is
+    // therefore not used here; it is only logged for traceability.
+    value: Math.round(Number(itemsValueCents) || 0) / 100,
     currency: String(currency).toUpperCase(),
-    // Required for GA4 to attach the event to the originating session.
+    // KEPT FOR NOW, pending arbitration: whether engagement_time_msec belongs on
+    // a server-side purchase must be decided by the validationMessages returned
+    // by /api/ga4-retry?validate=1 (validationBehavior ENFORCE_RECOMMENDATIONS),
+    // not by opinion. Do not remove it before that verdict.
     engagement_time_msec: 1,
+    items: Array.isArray(items) ? items : [],
   };
   // Only include session fields when they exist: GA4 treats an explicit null
   // as a value.
   if (gaSessionId) params.session_id = String(gaSessionId);
   if (gaSessionNumber) params.session_number = String(gaSessionNumber);
 
-  const body = {
+  return {
     client_id: String(gaClientId),
-    non_personalized_ads: false,
+    // Real payment instant, so Stripe/outbox retries do not shift the event.
+    timestamp_micros: Math.round(Number(timestampMicros) || Date.now() * 1000),
+    // No `non_personalized_ads` (deprecated) and deliberately NO `consent`
+    // block: with no consent block GA4 reuses the consent state of the online
+    // interactions carrying the same client_id, which reflects the visitor's
+    // actual choice better than anything we could assert server-side.
     events: [{ name: "purchase", params }],
   };
+}
 
+// Single POST to the Measurement Protocol. `validate` targets the debug
+// endpoint, which returns validationMessages instead of silently accepting.
+async function ga4Post(payload, { validate = false } = {}) {
+  const measurementId = process.env.GA4_MEASUREMENT_ID;
+  const apiSecret = process.env.GA4_API_SECRET;
+  if (!measurementId || !apiSecret) throw new Error("GA4_MEASUREMENT_ID / GA4_API_SECRET not set");
+  const base = validate
+    ? "https://www.google-analytics.com/debug/mp/collect"
+    : "https://www.google-analytics.com/mp/collect";
+  const body = validate ? { ...payload, validationBehavior: "ENFORCE_RECOMMENDATIONS" } : payload;
   const r = await fetchWithTimeout(
-    `https://www.google-analytics.com/mp/collect?measurement_id=${encodeURIComponent(measurementId)}&api_secret=${encodeURIComponent(apiSecret)}`,
+    `${base}?measurement_id=${encodeURIComponent(measurementId)}&api_secret=${encodeURIComponent(apiSecret)}`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) },
     5000
   );
-  // GA4 returns 204 even on an invalid payload: log the payload, not just status.
-  console.log("GA4 MP sent:", sessionId, "status:", r.status, "payload:", JSON.stringify(body).slice(0, 500));
+  let json = null;
+  if (validate) json = await r.json().catch(() => null);
+  return { ok: r.ok, status: r.status, json };
+}
+
+// ---- GA4 outbox --------------------------------------------------------
+// sendGa4Purchase is called AFTER done:<session> is written, so a GA4 failure
+// can never be retried by Stripe. The outbox owns tracking idempotence:
+// ga4:<session> holds the ready-to-post payload, ga4:queue lists the pending
+// ids (a LIST, never SCAN). Nothing here may affect the order.
+async function ga4Enqueue(sessionId, payload) {
+  const entry = {
+    session_id: String(sessionId),
+    payload,
+    status: "pending",
+    attempts: 0,
+    first_seen_at: Date.now(),
+  };
+  await kvSet(`ga4:${sessionId}`, entry, GA4_OUTBOX_TTL);
+  await kvRPush(GA4_QUEUE_KEY, String(sessionId));
+  return entry;
+}
+
+// One delivery attempt for an outbox entry; always persists the new state.
+// Past the 72h backdating limit the entry is marked `expired` instead of being
+// retried forever.
+async function ga4TrySend(entry) {
+  const key = `ga4:${entry.session_id}`;
+  const micros = Number(entry.payload && entry.payload.timestamp_micros) || 0;
+  if (micros > 0 && Date.now() - micros / 1000 > GA4_MAX_AGE_MS) {
+    entry.status = "expired";
+    entry.last_error = "older than GA4's 72h backdating limit — abandoned";
+    await kvSet(key, entry, GA4_OUTBOX_TTL);
+    return entry;
+  }
+  try {
+    const r = await ga4Post(entry.payload);
+    if (!r.ok) throw new Error("Measurement Protocol HTTP " + r.status);
+    entry.status = "sent";
+    entry.sent_at = Date.now();
+    delete entry.last_error;
+    console.log("GA4 MP sent:", entry.session_id, "status:", r.status, "payload:", JSON.stringify(entry.payload).slice(0, 500));
+  } catch (e) {
+    entry.status = "pending";
+    entry.attempts = (Number(entry.attempts) || 0) + 1;
+    entry.last_error = String((e && e.message) || e).slice(0, 200);
+    console.error("GA4 MP attempt failed for", entry.session_id, entry.last_error);
+  }
+  await kvSet(key, entry, GA4_OUTBOX_TTL);
+  return entry;
+}
+
+// Opportunistic drain: pop a few ids, retry them, requeue the ones still
+// failing. Capped in count AND in wall-clock time (no maxDuration on this
+// function). Callers must keep it inside a try/catch.
+async function ga4Drain({ max = 3, budgetMs = 4000 } = {}) {
+  const startedAt = Date.now();
+  const summary = { popped: 0, sent: 0, failed: 0, expired: 0, skipped: 0 };
+  for (let i = 0; i < max; i++) {
+    if (Date.now() - startedAt > budgetMs) break;
+    const id = await kvLPop(GA4_QUEUE_KEY);
+    if (!id) break;
+    summary.popped += 1;
+    const entry = await kvGet(`ga4:${id}`);
+    if (!entry || entry.status === "sent" || entry.status === "expired") { summary.skipped += 1; continue; }
+    const out = await ga4TrySend(entry);
+    if (out.status === "sent") summary.sent += 1;
+    else if (out.status === "expired") summary.expired += 1;
+    else { summary.failed += 1; await kvRPush(GA4_QUEUE_KEY, String(id)); }
+  }
+  return summary;
+}
+
+// Persist the intention FIRST, then try once. Never throws.
+async function sendGa4Purchase(opts) {
+  const payload = buildGa4Payload(opts);
+  if (!payload) {
+    console.error("GA4 MP SKIPPED for", opts && opts.sessionId, ": no ga_client_id (cart + session.metadata both empty)");
+    return null;
+  }
+  console.log(
+    "GA4 purchase queued:", opts.sessionId,
+    "value:", payload.events[0].params.value,
+    "charged:", opts.chargedCents == null ? "n/a" : (Number(opts.chargedCents) || 0) / 100
+  );
+  const entry = await ga4Enqueue(opts.sessionId, payload);
+  return ga4TrySend(entry);
 }
 
 function cleanAddress(a) {
@@ -524,17 +675,35 @@ export default async function handler(req, res) {
         } catch (e) { console.error("Meta CAPI error", e); }
 
         // Server-side ad tracking (never blocks the order; pixel is the backup).
+        // done:<session> is already durable above, so Stripe will never retry a
+        // GA4 failure: the ga4:<session> outbox carries that retry instead.
         try {
           await sendGa4Purchase({
             sessionId: session.id,
-            valueCents: session.amount_total,
+            // GA4 value = SUM(price x quantity) of items, shipping and tax
+            // EXCLUDED. cartTotal is exactly that sum (the same one used to
+            // derive shippingCents). session.amount_total stays available and
+            // is logged, but is no longer sent as `value`.
+            itemsValueCents: cartTotal,
+            chargedCents: session.amount_total,
             currency: session.currency || cart.currency,
             // Redis may have expired; Stripe metadata is durable, so fall back on it.
             gaClientId: (cart && cart.ga_client_id) || (session.metadata && session.metadata.ga_client_id) || null,
             gaSessionId: (cart && cart.ga_session_id) || (session.metadata && session.metadata.ga_session_id) || null,
             gaSessionNumber: (cart && cart.ga_session_number) || (session.metadata && session.metadata.ga_session_number) || null,
+            // item_name is matched by variant_id against the Shopify order
+            // lines, and omitted when the match fails (never invented).
+            items: buildGa4Items(cart, createdOrder),
+            timestampMicros: ga4TimestampMicros(session),
           });
         } catch (e) { console.error("GA4 MP error", e); }
+
+        // Opportunistic outbox drain: at most 3 entries, hard time budget, and
+        // wrapped so it can never fail the webhook or touch the order state.
+        try {
+          const drained = await ga4Drain({ max: 3, budgetMs: 4000 });
+          if (drained.popped) console.log("GA4 outbox drain:", JSON.stringify(drained));
+        } catch (e) { console.error("GA4 outbox drain error", e); }
 
         try { await kvDel(key); } catch (e) { console.error("cart cleanup failed for", key, e); }
       }
