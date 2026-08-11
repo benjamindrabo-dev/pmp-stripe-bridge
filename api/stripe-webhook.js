@@ -89,10 +89,19 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 12000) {
 const sha256 = (v) =>
   crypto.createHash("sha256").update(String(v).trim().toLowerCase()).digest("hex");
 
-async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart, address, name, orderId, orderNumber }) {
-  const pixelId = process.env.META_PIXEL_ID;
-  const token = process.env.META_CAPI_TOKEN;
-  if (!pixelId || !token) { console.error("Meta CAPI SKIPPED: META_PIXEL_ID / META_CAPI_TOKEN not set in Vercel"); return; }
+// Build the Conversions API request body — and nothing else. Sending is a
+// separate step (metaTrySend), deliberately: the durability of the intention
+// must be acquired BEFORE done:<session> is written, while the delivery attempt
+// belongs after the lease is released. This is the exact same split as GA4.
+// `fallback` supplies fbp / fbc / external_id when the Redis cart is gone (the
+// reconciliation path): those three live in session.metadata, which is durable.
+// It deliberately does NOT supply client_ip_address / client_user_agent —
+// Stripe does not carry them and a fabricated value would poison matching.
+function buildMetaPurchaseBody({ sessionId, email, phone, value, currency, cart, address, name, orderId, orderNumber, fallback }) {
+  const fb = fallback || {};
+  const externalId = (cart && cart.external_id) || fb.external_id || null;
+  const fbpValue = (cart && cart.fbp) || fb.fbp || null;
+  const fbcValue = (cart && cart.fbc) || fb.fbc || null;
 
   const user_data = {};
   // external_id = a stable, hashed customer identifier. Meta weighs it heavily
@@ -102,7 +111,7 @@ async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart
   const extIds = [];
   // Browser Pixel hashes Advanced Matching values automatically. CAPI requires
   // the server copy to be SHA-256 hashed explicitly so both channels match.
-  if (cart && cart.external_id) extIds.push(sha256(cart.external_id));
+  if (externalId) extIds.push(sha256(externalId));
   if (email) extIds.push(sha256(email));
   if (extIds.length) user_data.external_id = extIds;
   if (email) user_data.em = [sha256(email)];
@@ -118,15 +127,20 @@ async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart
     if (address.postal_code) user_data.zp = [sha256(String(address.postal_code).replace(/\s/g, ""))];
     if (address.country) user_data.country = [sha256(address.country)];
   }
-  if (cart && cart.fbp) user_data.fbp = cart.fbp;
-  if (cart && cart.fbc) user_data.fbc = cart.fbc;
+  if (fbpValue) user_data.fbp = fbpValue;
+  if (fbcValue) user_data.fbc = fbcValue;
+  // client_ip_address / client_user_agent exist ONLY in the Redis cart. When
+  // the cart is gone they are omitted — never invented.
   if (cart && cart.ip) user_data.client_ip_address = cart.ip;
   if (cart && cart.ua) user_data.client_user_agent = cart.ua;
 
-  const body = {
+  return {
     data: [
       {
         event_name: "Purchase",
+        // Frozen at build time and stored in the outbox, like GA4's
+        // timestamp_micros: a retry two hours later must not be dated two
+        // hours later.
         event_time: Math.floor(Date.now() / 1000),
         event_id: sessionId,                  // dedupe key shared with the pixel
         action_source: "website",
@@ -151,18 +165,19 @@ async function sendMetaPurchase({ sessionId, email, phone, value, currency, cart
       },
     ],
   };
+}
 
+// Transport only. Same URL, same headers, same serialisation as before.
+async function metaPost(body) {
+  const pixelId = process.env.META_PIXEL_ID;
+  const token = process.env.META_CAPI_TOKEN;
+  if (!pixelId || !token) throw new Error("META_PIXEL_ID / META_CAPI_TOKEN not set");
   const r = await fetch(
     `https://graph.facebook.com/v21.0/${pixelId}/events?access_token=${encodeURIComponent(token)}`,
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }
   );
   const j = await r.json().catch(() => null);
-  // Explicitly assert Meta acknowledged the event, not just HTTP 200.
-  if (!r.ok || !j || j.events_received !== 1) {
-    console.error("Meta CAPI FAILED for", sessionId, "status:", r.status, "body:", JSON.stringify(j || {}).slice(0, 300));
-  } else {
-    console.log("Meta CAPI ok:", sessionId, JSON.stringify(j));
-  }
+  return { ok: r.ok, status: r.status, json: j };
 }
 
 // ---- GA4 Measurement Protocol (server-side purchase tracking) ----
@@ -368,26 +383,7 @@ async function ga4Post(payload, { validate = false } = {}) {
 // ga4:<session> holds the ready-to-post payload, ga4:queue lists the pending
 // ids (a LIST, never SCAN). Nothing here may affect the order.
 async function ga4Enqueue(sessionId, payload) {
-  // IDEMPOTENT. The intention is now persisted BEFORE done:<session>, so a
-  // crash between the two makes Stripe redeliver and reach this code again.
-  // An existing entry is therefore never rewritten (a `sent` entry must never
-  // fall back to `pending`) and never pushed a second time onto ga4:queue.
-  const key = `ga4:${sessionId}`;
-  const existing = await kvGet(key);
-  if (existing && existing.session_id) {
-    console.log("GA4 outbox entry already present for", sessionId, "status:", existing.status, "— not re-enqueued");
-    return existing;
-  }
-  const entry = {
-    session_id: String(sessionId),
-    payload,
-    status: "pending",
-    attempts: 0,
-    first_seen_at: Date.now(),
-  };
-  await kvSet(key, entry, GA4_OUTBOX_TTL);
-  await kvRPush(GA4_QUEUE_KEY, String(sessionId));
-  return entry;
+  return outboxEnqueue("ga4", sessionId, payload, GA4_OUTBOX_TTL);
 }
 
 // One delivery attempt for an outbox entry; always persists the new state.
@@ -421,23 +417,34 @@ async function ga4TrySend(entry) {
   return entry;
 }
 
-// Opportunistic drain: pop a few ids, retry them, requeue the ones still
-// failing. Capped in count AND in wall-clock time (no maxDuration on this
+// Opportunistic BI-CHANNEL drain: pop a few session ids, retry BOTH channels
+// for each, and requeue the id only when at least one channel is still
+// pending. Capped in count AND in wall-clock time (no maxDuration on this
 // function). Callers must keep it inside a try/catch.
-async function ga4Drain({ max = 3, budgetMs = 4000 } = {}) {
+async function outboxDrain({ max = 3, budgetMs = 4000 } = {}) {
   const startedAt = Date.now();
-  const summary = { popped: 0, sent: 0, failed: 0, expired: 0, skipped: 0 };
+  const summary = { popped: 0, sent: 0, failed: 0, expired: 0, skipped: 0, requeued: 0 };
   for (let i = 0; i < max; i++) {
     if (Date.now() - startedAt > budgetMs) break;
-    const id = await kvLPop(GA4_QUEUE_KEY);
+    const id = await kvLPop(OUTBOX_QUEUE_KEY);
     if (!id) break;
     summary.popped += 1;
-    const entry = await kvGet(`ga4:${id}`);
-    if (!entry || entry.status === "sent" || entry.status === "expired") { summary.skipped += 1; continue; }
-    const out = await ga4TrySend(entry);
-    if (out.status === "sent") summary.sent += 1;
-    else if (out.status === "expired") summary.expired += 1;
-    else { summary.failed += 1; await kvRPush(GA4_QUEUE_KEY, String(id)); }
+    let stillPending = false;
+    let touched = false;
+    for (const channel of OUTBOX_CHANNELS) {
+      const entry = await kvGet(`${channel}:${id}`);
+      if (!entry || !entry.session_id) continue;
+      if (entry.status === "sent" || entry.status === "expired") continue;
+      touched = true;
+      const out = channel === "ga4" ? await ga4TrySend(entry) : await metaTrySend(entry);
+      if (out.status === "sent") summary.sent += 1;
+      else if (out.status === "expired") summary.expired += 1;
+      else { summary.failed += 1; stillPending = true; }
+    }
+    if (!touched) summary.skipped += 1;
+    // Requeue only if something is still pending: a session whose two channels
+    // are sent/expired leaves the queue for good.
+    if (stillPending) { summary.requeued += 1; await kvRPush(OUTBOX_QUEUE_KEY, String(id)); }
   }
   return summary;
 }
@@ -459,6 +466,120 @@ async function ga4PersistIntent(opts) {
     "charged:", opts.chargedCents == null ? "n/a" : (Number(opts.chargedCents) || 0) / 100
   );
   return ga4Enqueue(opts.sessionId, payload);
+}
+
+// ---- Shared outbox plumbing (GA4 + Meta) --------------------------------
+// Both channels have exactly the same failure mode, so they share exactly the
+// same machinery: one JSON entry per channel per session
+//   ga4:<stripe_session_id>   { session_id, payload, status, attempts,
+//   meta:<stripe_session_id>     first_seen_at, sent_at?, last_error? }
+//                             status ∈ pending | sent | expired
+// and ONE queue holding SESSION IDS (never payloads), so a single queue entry
+// covers both channels.
+//
+// QUEUE NAME: deliberately kept as "ga4:queue" even though it now serves both
+// channels. Renaming it would orphan every id already queued in production —
+// a LIST that is being popped concurrently by the webhook and by
+// /api/ga4-retry has no safe in-place migration (a copy-then-delete races with
+// live pops and can drop or duplicate ids). Read OUTBOX_QUEUE_KEY as
+// "outbox:queue"; the string is legacy, the semantics are bi-channel.
+const OUTBOX_QUEUE_KEY = GA4_QUEUE_KEY;
+const OUTBOX_CHANNELS = ["ga4", "meta"];
+const OUTBOX_SIBLING = { ga4: "meta", meta: "ga4" };
+
+// IDEMPOTENT enqueue, shared by both channels. The intention is persisted
+// BEFORE done:<session>, so a crash between the two makes Stripe redeliver and
+// reach this code again: an existing entry is therefore NEVER rewritten (a
+// `sent` entry must never fall back to `pending`) and the session id is pushed
+// onto the queue AT MOST ONCE, even when the two channels are enqueued back to
+// back — when the sibling channel already holds a `pending` entry the id is
+// necessarily still in the queue, so the push is skipped. A sibling that is
+// `sent`/`expired` may already have been popped and dropped, so in that case we
+// do push: a duplicate id in the queue is harmless (the second pop finds both
+// channels sent and skips), a missing one is a lost conversion.
+async function outboxEnqueue(channel, sessionId, payload, ttlSeconds) {
+  const key = `${channel}:${sessionId}`;
+  const label = channel === "ga4" ? "GA4" : "Meta";
+  const existing = await kvGet(key);
+  if (existing && existing.session_id) {
+    console.log(label, "outbox entry already present for", sessionId, "status:", existing.status, "— not re-enqueued");
+    return existing;
+  }
+  const entry = {
+    session_id: String(sessionId),
+    payload,
+    status: "pending",
+    attempts: 0,
+    first_seen_at: Date.now(),
+  };
+  await kvSet(key, entry, ttlSeconds);
+  let siblingPending = false;
+  try {
+    const sibling = await kvGet(`${OUTBOX_SIBLING[channel]}:${sessionId}`);
+    siblingPending = !!(sibling && sibling.session_id && sibling.status === "pending");
+  } catch (e) {
+    // Unknown sibling state: push. A duplicate id is benign, a missing one is not.
+    console.error("outbox sibling lookup failed for", sessionId, String((e && e.message) || e));
+  }
+  if (!siblingPending) await kvRPush(OUTBOX_QUEUE_KEY, String(sessionId));
+  return entry;
+}
+
+// ---- Meta CAPI outbox ---------------------------------------------------
+// TTL is 8 days, longer than GA4's 4, because Meta's acceptance window is
+// longer (see META_MAX_AGE_MS).
+const META_OUTBOX_TTL = 691200;                  // 8 days > Meta's 7-day window
+// GA4's 72h backdating limit is a GA4 rule and is deliberately NOT applied
+// here: the Conversions API accepts events up to 7 days old. Reusing 72h would
+// abandon events Meta would still have accepted. The `expired` state is kept —
+// same state machine — only the threshold differs.
+const META_MAX_AGE_MS = 7 * 24 * 3600 * 1000;
+
+// One delivery attempt for a Meta outbox entry; always persists the new state.
+// The age is measured from the stored event_time, so a retry never re-dates the
+// event and never resets its own expiry clock.
+async function metaTrySend(entry) {
+  const key = `meta:${entry.session_id}`;
+  const evt = entry.payload && entry.payload.data && entry.payload.data[0];
+  const eventTime = Number(evt && evt.event_time) || 0;
+  if (eventTime > 0 && Date.now() - eventTime * 1000 > META_MAX_AGE_MS) {
+    entry.status = "expired";
+    entry.last_error = "older than Meta's 7-day event window — abandoned";
+    await kvSet(key, entry, META_OUTBOX_TTL);
+    return entry;
+  }
+  try {
+    const r = await metaPost(entry.payload);
+    // Explicitly assert Meta acknowledged the event, not just HTTP 200.
+    if (!r.ok || !r.json || r.json.events_received !== 1) {
+      throw new Error("Meta CAPI HTTP " + r.status + " body: " + JSON.stringify(r.json || {}).slice(0, 300));
+    }
+    entry.status = "sent";
+    entry.sent_at = Date.now();
+    delete entry.last_error;
+    console.log("Meta CAPI ok:", entry.session_id, JSON.stringify(r.json));
+  } catch (e) {
+    entry.status = "pending";
+    entry.attempts = (Number(entry.attempts) || 0) + 1;
+    entry.last_error = String((e && e.message) || e).slice(0, 200);
+    console.error("Meta CAPI FAILED for", entry.session_id, entry.last_error);
+  }
+  await kvSet(key, entry, META_OUTBOX_TTL);
+  return entry;
+}
+
+// Persist the Meta purchase intention in the outbox — and nothing else.
+// Returns the outbox entry, or null when the CAPI credentials are missing (an
+// unsendable entry would just churn the queue until it expires).
+async function metaPersistIntent(opts) {
+  if (!process.env.META_PIXEL_ID || !process.env.META_CAPI_TOKEN) {
+    console.error("Meta CAPI SKIPPED: META_PIXEL_ID / META_CAPI_TOKEN not set in Vercel");
+    return null;
+  }
+  const body = buildMetaPurchaseBody(opts);
+  const cd = body.data[0].custom_data;
+  console.log("Meta purchase queued:", opts.sessionId, "value:", cd.value, cd.currency);
+  return outboxEnqueue("meta", opts.sessionId, body, META_OUTBOX_TTL);
 }
 
 function cleanAddress(a) {
@@ -714,6 +835,38 @@ export default async function handler(req, res) {
             console.error("GA4 reconciliation outbox persist failed — POTENTIAL LOST CONVERSION for", session.id, e);
           }
 
+          // Same treatment for Meta CAPI, under the same conditions: BEFORE the
+          // done marker and BEFORE the cart is deleted, reading the cart above
+          // (reconciledCart) before any deletion. outboxEnqueue is idempotent,
+          // so an entry already sent by the delivery that created the order is
+          // never resurrected. Fully wrapped: no Meta path may fail the order.
+          try {
+            const rcd = session.customer_details || {};
+            const rsd = (session.collected_information && session.collected_information.shipping_details) || session.shipping_details || {};
+            await metaPersistIntent({
+              sessionId: session.id,
+              email: rcd.email,
+              phone: rcd.phone,
+              // Identical semantics to the nominal path: amount actually charged.
+              value: (Number(session.amount_total) || 0) / 100,
+              currency: session.currency || (reconciledCart && reconciledCart.currency),
+              cart: reconciledCart,
+              address: rsd.address || rcd.address || {},
+              name: rsd.name || rcd.name,
+              orderId: existingOrder.legacyResourceId || existingOrder.id,
+              orderNumber: existingOrder.name,
+              // Cart may be gone: fbp / fbc / browser id survive in Stripe
+              // metadata. ua and ip do NOT exist there and stay absent.
+              fallback: {
+                fbp: (session.metadata && session.metadata.fbp) || null,
+                fbc: (session.metadata && session.metadata.fbc) || null,
+                external_id: (session.metadata && (session.metadata.browser_id || session.metadata.person_id)) || null,
+              },
+            });
+          } catch (e) {
+            console.error("Meta reconciliation outbox persist failed — POTENTIAL LOST CONVERSION for", session.id, e);
+          }
+
           await kvSet(doneKey, { order_id: existingOrder.legacyResourceId || existingOrder.id, reconciled: true }, 7776000);
           await kvRelease(claimKey, claimToken);
           try { await kvDel(key); } catch (e) { console.error("cart cleanup failed for", key, e); }
@@ -849,14 +1002,15 @@ export default async function handler(req, res) {
           console.error("GA4 outbox persist failed — POTENTIAL LOST CONVERSION for", session.id, e);
         }
 
-        // Completion is durable before analytics. If this write fails, Stripe
-        // retries and Shopify reconciliation prevents a duplicate order.
-        await kvSet(doneKey, { order_id: createdOrder && createdOrder.id, completed_at: Date.now() }, 7776000);
-        await kvRelease(claimKey, claimToken);
-
-        // Server-side ad tracking (never blocks the order; pixel is the backup).
+        // Meta CAPI intention persisted BEFORE done:<session>, exactly like
+        // GA4 and for exactly the same reason: it used to be SENT after the
+        // done marker, so a crash in between made the redelivery answer
+        // `duplicate: true` and the Purchase event was never sent at all.
+        // Building the body here also freezes event_time and event_id, so any
+        // later retry is byte-identical and Meta de-dupes it against the pixel.
+        let metaEntry = null;
         try {
-          await sendMetaPurchase({
+          metaEntry = await metaPersistIntent({
             sessionId: session.id,
             email: cd.email,
             phone: cd.phone,
@@ -868,6 +1022,21 @@ export default async function handler(req, res) {
             orderId: createdOrder && createdOrder.id,
             orderNumber: createdOrder && createdOrder.order_number,
           });
+        } catch (e) {
+          console.error("Meta outbox persist failed — POTENTIAL LOST CONVERSION for", session.id, e);
+        }
+
+        // Completion is durable before analytics. If this write fails, Stripe
+        // retries and Shopify reconciliation prevents a duplicate order.
+        await kvSet(doneKey, { order_id: createdOrder && createdOrder.id, completed_at: Date.now() }, 7776000);
+        await kvRelease(claimKey, claimToken);
+
+        // Server-side ad tracking: delivery attempt only (never blocks the
+        // order; pixel is the backup). done:<session> is already durable above,
+        // so Stripe will never retry a Meta failure: the meta:<session> outbox
+        // persisted BEFORE the done marker carries that retry instead.
+        try {
+          if (metaEntry && metaEntry.status !== "sent" && metaEntry.status !== "expired") await metaTrySend(metaEntry);
         } catch (e) { console.error("Meta CAPI error", e); }
 
         // Delivery attempt only (never blocks the order; pixel is the backup).
@@ -881,9 +1050,9 @@ export default async function handler(req, res) {
         // Opportunistic outbox drain: at most 3 entries, hard time budget, and
         // wrapped so it can never fail the webhook or touch the order state.
         try {
-          const drained = await ga4Drain({ max: 3, budgetMs: 4000 });
-          if (drained.popped) console.log("GA4 outbox drain:", JSON.stringify(drained));
-        } catch (e) { console.error("GA4 outbox drain error", e); }
+          const drained = await outboxDrain({ max: 3, budgetMs: 4000 });
+          if (drained.popped) console.log("outbox drain:", JSON.stringify(drained));
+        } catch (e) { console.error("outbox drain error", e); }
 
         try { await kvDel(key); } catch (e) { console.error("cart cleanup failed for", key, e); }
       }
