@@ -73,7 +73,7 @@ export default async function handler(req, res) {
   // Vercel cron sets x-vercel-cron. Anything else must present CRON_SECRET.
   // Without this the endpoint is a free way for anyone to burn your API quota.
   const isCron = Boolean(req.headers["x-vercel-cron"]);
-  const secret = process.env.CRON_SECRET;
+  const secret = process.env.BACKFILL_KEY || process.env.CRON_SECRET;
   const authorized =
     isCron || (secret && req.headers.authorization === `Bearer ${secret}`);
 
