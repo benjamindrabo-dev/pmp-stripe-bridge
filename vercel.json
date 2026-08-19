@@ -8,6 +8,10 @@
     { "source": "/api/mcp-health", "destination": "/api/oauth?route=health" }
   ],
   "functions": {
-    "api/mcp.js": { "maxDuration": 60 }
-  }
+    "api/mcp.js": { "maxDuration": 60 },
+    "api/ads-backfill.js": { "maxDuration": 60 }
+  },
+  "crons": [
+    { "path": "/api/ads-backfill", "schedule": "0 */6 * * *" }
+  ]
 }
