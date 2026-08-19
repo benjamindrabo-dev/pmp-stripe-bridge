@@ -15,7 +15,7 @@
 // Idempotency: an Upstash key per Stripe session id, TTL 90 days. Google also
 // dedupes on orderId, so a double send is harmless — this just avoids the call.
 
-import { uploadPurchase, adsConfigured } from "./google-ads-lib.js";
+import { uploadPurchase, adsConfigured } from "./google-ads-datamanager.js";
 
 const LOOKBACK_HOURS = 48;   // comfortably covers a missed cron run
 const MAX_PER_RUN = 100;     // Stripe page size; keeps the run well under the timeout
