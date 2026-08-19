@@ -11,7 +11,7 @@
 //
 // Dependency-free (fetch only), matching the rest of the project.
 
-const ADS_API_VERSION = "v21";
+const ADS_API_VERSION = "v24";
 const TOKEN_URL = "https://oauth2.googleapis.com/token";
 
 // Access tokens live 1h. Module-scope cache: warm invocations reuse it, cold
