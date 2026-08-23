@@ -658,9 +658,29 @@ async function recoverCartFromStripe(session) {
   return { items, currency: String(session.currency || "USD").toLowerCase(), note: "Recovered from Stripe Session metadata" };
 }
 
-async function createShopifyOrder({ items, currency, email, phone, shipping, billing, note, sessionId, discount, chargedCents }) {
+async function createShopifyOrder({ items, currency, email, phone, shipping, billing, note, sessionId, discount, chargedCents, attribution }) {
   const charged = Number(chargedCents);
   if (!Number.isInteger(charged) || charged < 0) throw new Error("Invalid signed Stripe amount");
+  const noteAttributes = sessionId ? [{ name: "stripe_session_id", value: String(sessionId) }] : [];
+  const attributionAttributes = {
+    tracking_version: attribution && attribution.tracking_version,
+    first_touch_landing: attribution && attribution.first_touch_landing,
+    first_touch_referrer: attribution && attribution.first_touch_referrer,
+    first_touch_source: attribution && attribution.first_touch_source,
+    first_touch_medium: attribution && attribution.first_touch_medium,
+    first_touch_campaign: attribution && attribution.first_touch_campaign,
+    first_touch_at: attribution && attribution.first_touch_at,
+    last_touch_landing: attribution && attribution.last_touch_landing,
+    last_touch_referrer: attribution && attribution.last_touch_referrer,
+    last_touch_source: attribution && attribution.last_touch_source,
+    last_touch_medium: attribution && attribution.last_touch_medium,
+    last_touch_campaign: attribution && attribution.last_touch_campaign,
+    last_touch_at: attribution && attribution.last_touch_at,
+  };
+  Object.entries(attributionAttributes).forEach(([name, value]) => {
+    if (value != null && String(value).trim()) noteAttributes.push({ name, value: String(value).trim().slice(0, 500) });
+  });
+
   const order = {
     line_items: items.map((it) => {
       const li = { variant_id: Number(it.variant_id), quantity: Number(it.quantity) };
@@ -682,7 +702,7 @@ async function createShopifyOrder({ items, currency, email, phone, shipping, bil
     phone: phone || undefined,
     note: `Paid via Stripe (${(currency || "").toUpperCase()}). Stripe session: ${sessionId || "n/a"}. ${note || ""}`.trim(),
     // Machine-readable link back to the Stripe payment (refunds, dedup, audits).
-    note_attributes: sessionId ? [{ name: "stripe_session_id", value: String(sessionId) }] : undefined,
+    note_attributes: noteAttributes.length ? noteAttributes : undefined,
     source_identifier: String(sessionId),
     // Shopify tags are limited to 40 characters; keep the full Session ID in
     // source_identifier/note_attributes and use a deterministic short tag.
@@ -977,6 +997,7 @@ export default async function handler(req, res) {
             sessionId: session.id,
             discount,
             chargedCents: session.amount_total,
+            attribution: Object.assign({}, session.metadata || {}, cart || {}),
           });
           // Money check: if Shopify ever ignores order.discount_codes, the order
           // total would silently exceed the amount charged. Surface it loudly in

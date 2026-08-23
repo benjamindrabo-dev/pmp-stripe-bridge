@@ -222,6 +222,10 @@ export default async function handler(req, res) {
       utm_source, utm_medium, utm_campaign, utm_content, utm_term,
       gclid, gbraid, wbraid, ttclid, msclkid,
       ga_client_id, ga_session_id, ga_session_number,
+      first_touch_landing_url, first_touch_referrer, first_touch_source,
+      first_touch_medium, first_touch_campaign, first_touch_at,
+      last_touch_landing_url, last_touch_referrer, last_touch_source,
+      last_touch_medium, last_touch_campaign, last_touch_at,
     } = req.body || {};
     if (!Array.isArray(requestedItems) || requestedItems.length === 0) {
       return res.status(400).json({ error: "Empty cart" });
@@ -261,7 +265,7 @@ export default async function handler(req, res) {
     // every payment attempt can be reconciled in Stripe even if the browser
     // closes before the thank-you page. Values are sanitized and size-limited.
     const attribution = {
-      tracking_version: "pmp_v2",
+      tracking_version: "pmp_v3",
       // Stable pseudonymous person key: several Checkout Sessions created by
       // the same browser can be counted as one person without card data/PII.
       person_id: safeText(external_id, 64),
@@ -285,6 +289,18 @@ export default async function handler(req, res) {
       ga_client_id: safeText(ga_client_id, 64),
       ga_session_id: safeText(ga_session_id, 64),
       ga_session_number: safeText(ga_session_number, 64),
+      first_touch_landing: safePageUrl(first_touch_landing_url),
+      first_touch_referrer: safePageUrl(first_touch_referrer),
+      first_touch_source: safeText(first_touch_source, 100),
+      first_touch_medium: safeText(first_touch_medium, 100),
+      first_touch_campaign: safeText(first_touch_campaign, 200),
+      first_touch_at: safeText(first_touch_at, 40),
+      last_touch_landing: safePageUrl(last_touch_landing_url),
+      last_touch_referrer: safePageUrl(last_touch_referrer),
+      last_touch_source: safeText(last_touch_source, 100),
+      last_touch_medium: safeText(last_touch_medium, 100),
+      last_touch_campaign: safeText(last_touch_campaign, 200),
+      last_touch_at: safeText(last_touch_at, 40),
     };
     Object.entries(attribution).forEach(([key, value]) => {
       if (value) params.append(`metadata[${key}]`, value);
@@ -357,6 +373,18 @@ export default async function handler(req, res) {
       ga_client_id: attribution.ga_client_id,
       ga_session_id: attribution.ga_session_id,
       ga_session_number: attribution.ga_session_number,
+      first_touch_landing: attribution.first_touch_landing,
+      first_touch_referrer: attribution.first_touch_referrer,
+      first_touch_source: attribution.first_touch_source,
+      first_touch_medium: attribution.first_touch_medium,
+      first_touch_campaign: attribution.first_touch_campaign,
+      first_touch_at: attribution.first_touch_at,
+      last_touch_landing: attribution.last_touch_landing,
+      last_touch_referrer: attribution.last_touch_referrer,
+      last_touch_source: attribution.last_touch_source,
+      last_touch_medium: attribution.last_touch_medium,
+      last_touch_campaign: attribution.last_touch_campaign,
+      last_touch_at: attribution.last_touch_at,
       ua: req.headers["user-agent"] || null,
       ip: String(req.headers["x-forwarded-for"] || "").split(",")[0].trim() || null,
     });
