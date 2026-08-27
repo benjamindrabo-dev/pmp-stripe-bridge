@@ -12,6 +12,6 @@
     "api/ads-backfill.js": { "maxDuration": 60 }
   },
   "crons": [
-    { "path": "/api/ads-backfill", "schedule": "0 */6 * * *" }
+    { "path": "/api/ads-backfill", "schedule": "0 */3 * * *" }
   ]
 }
