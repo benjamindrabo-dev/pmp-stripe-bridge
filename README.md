@@ -14,6 +14,8 @@ Shopify order (paid, inventory decremented) <── /api/stripe-webhook <── 
 ## Files
 - `api/create-checkout.js` — creates the Stripe Checkout Session.
 - `api/stripe-webhook.js` — on paid session, creates the Shopify order.
+- `api/recover-checkout.js` — rebuilds an abandoned cart across devices from an opaque Stripe Session ID.
+- `lib/omnisend.js` — emits the standard Omnisend `started checkout` event when its API key is configured.
 - `shopify-snippet-pay-with-stripe.liquid` — the storefront button.
 - `.env.example` — every secret/config value.
 
@@ -29,6 +31,23 @@ Shopify order (paid, inventory decremented) <── /api/stripe-webhook <── 
 3. Deploy. Note the URL, e.g. `https://your-app.vercel.app`.
 4. **Stripe → Developers → Webhooks → Add endpoint**: URL `https://your-app.vercel.app/api/stripe-webhook`, event `checkout.session.completed`. Copy the **Signing secret** into `STRIPE_WEBHOOK_SECRET`. Redeploy.
 5. Paste `shopify-snippet-pay-with-stripe.liquid` into your theme; set `MIDDLEWARE_URL` to `https://your-app.vercel.app/api/create-checkout`.
+
+## Checkout correlation and Omnisend
+
+The storefront should send `email`, `shopify_cart_token`, and
+`shopify_cart_url` with the cart. The bridge stores the normalized cart token
+on both the Checkout Session and its PaymentIntent, and copies it onto the paid
+Shopify order. This distinguishes three different states during an audit:
+
+- Checkout Session exists: the Stripe bridge opened.
+- PaymentIntent exists: the shopper submitted a payment method.
+- `payment_status=paid`: payment succeeded.
+
+Set `OMNISEND_API_KEY` (scope `events.write`) to send `started checkout`
+server-side. If it is absent, the storefront can push the same deterministic
+event through Omnisend's browser snippet. Paid purchases continue through the
+Shopify order sync; do not also send `placed order` directly unless that sync is
+disabled, because duplicate real-time order events can trigger duplicate flows.
 
 ## Test before going live
 - Use `sk_test_…` and Stripe test card `4242 4242 4242 4242`, place an order, confirm a **paid** Shopify order appears with correct items + inventory decremented.

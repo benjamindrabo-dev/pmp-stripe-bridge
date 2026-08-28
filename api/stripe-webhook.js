@@ -684,6 +684,16 @@ async function createShopifyOrder({ items, currency, email, phone, shipping, bil
   const charged = Number(chargedCents);
   if (!Number.isInteger(charged) || charged < 0) throw new Error("Invalid signed Stripe amount");
   const noteAttributes = sessionId ? [{ name: "stripe_session_id", value: String(sessionId) }] : [];
+  const bridgeCorrelation = {
+    shopify_cart_token: attribution && attribution.shopify_cart_token,
+    bridge_client_reference_id: attribution && attribution.client_reference_id,
+    bridge_started_at: attribution && attribution.bridge_started_at,
+  };
+  Object.entries(bridgeCorrelation).forEach(([name, value]) => {
+    if (value != null && String(value).trim()) {
+      noteAttributes.push({ name, value: String(value).trim().slice(0, 500) });
+    }
+  });
   const googleClickIds = googleAdsClickIds(attribution);
   const metaClickId = metaAdsClickId(attribution);
   if (googleClickIds.length) {
@@ -1037,7 +1047,13 @@ export default async function handler(req, res) {
             sessionId: session.id,
             discount,
             chargedCents: session.amount_total,
-            attribution: Object.assign({}, session.metadata || {}, cart || {}),
+            attribution: Object.assign({}, session.metadata || {}, cart || {}, {
+              // Stripe's client_reference_id is the authoritative copy. Redis
+              // remains the fallback for sessions created before this field was
+              // added to the webhook order path.
+              client_reference_id: session.client_reference_id || (cart && cart.client_reference_id) ||
+                (session.metadata && session.metadata.browser_id) || null,
+            }),
           });
           // Money check: if Shopify ever ignores order.discount_codes, the order
           // total would silently exceed the amount charged. Surface it loudly in

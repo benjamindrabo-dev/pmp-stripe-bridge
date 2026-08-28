@@ -35,6 +35,11 @@ export default function handler(req, res) {
       mode: stripeKey.startsWith("sk_live_") ? "live" : stripeKey.startsWith("sk_test_") ? "test" : stripeKey ? "configured" : "missing",
       webhook_secret_configured: required.stripe_webhook_secret,
     },
+    omnisend: {
+      started_checkout_browser_fallback: true,
+      shopify_paid_order_sync: true,
+      direct_events_api_configured: Boolean(process.env.OMNISEND_API_KEY),
+    },
     store_origin: process.env.STORE_ORIGIN || null,
     dependencies: required,
   });
