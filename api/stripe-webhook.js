@@ -671,16 +671,30 @@ function googleAdsClickIds(attribution) {
   });
 }
 
+// `fbp` only identifies a browser with the Meta pixel; it exists on paid and
+// unpaid traffic alike. `fbc` is the click identifier derived from Meta's
+// fbclid parameter, so it is the only Meta value used to mark an ad-attributed
+// order in Shopify.
+function metaAdsClickId(attribution) {
+  const value = attribution && attribution.fbc;
+  return value != null && String(value).trim() ? String(value).trim().slice(0, 255) : null;
+}
+
 async function createShopifyOrder({ items, currency, email, phone, shipping, billing, note, sessionId, discount, chargedCents, attribution }) {
   const charged = Number(chargedCents);
   if (!Number.isInteger(charged) || charged < 0) throw new Error("Invalid signed Stripe amount");
   const noteAttributes = sessionId ? [{ name: "stripe_session_id", value: String(sessionId) }] : [];
   const googleClickIds = googleAdsClickIds(attribution);
+  const metaClickId = metaAdsClickId(attribution);
   if (googleClickIds.length) {
     noteAttributes.push({ name: "google_ads_paid", value: "yes" });
     for (const click of googleClickIds) {
       noteAttributes.push({ name: `google_ads_${click.type}`, value: click.value });
     }
+  }
+  if (metaClickId) {
+    noteAttributes.push({ name: "meta_ads_paid", value: "yes" });
+    noteAttributes.push({ name: "meta_ads_fbc", value: metaClickId });
   }
   const attributionAttributes = {
     tracking_version: attribution && attribution.tracking_version,
@@ -731,6 +745,7 @@ async function createShopifyOrder({ items, currency, email, phone, shipping, bil
       `stripe_${crypto.createHash("sha256").update(String(sessionId)).digest("hex").slice(0, 32)}`,
       ...(googleClickIds.length ? ["google_ads_paid"] : []),
       ...googleClickIds.map((click) => `google_ads_${click.type}`),
+      ...(metaClickId ? ["meta_ads_paid", "meta_ads_fbc"] : []),
     ].join(", "),
     send_receipt: true,
     send_fulfillment_receipt: false,
