@@ -658,10 +658,30 @@ async function recoverCartFromStripe(session) {
   return { items, currency: String(session.currency || "USD").toLowerCase(), note: "Recovered from Stripe Session metadata" };
 }
 
+// Google click identifiers are captured durably on the Stripe Checkout Session.
+// Mirror them onto the Shopify order so the sales team can filter paid Google
+// orders without opening Stripe. More than one identifier can be present on a
+// session, so retain each one rather than picking an arbitrary winner.
+function googleAdsClickIds(attribution) {
+  const source = attribution || {};
+  return ["gclid", "gbraid", "wbraid"].flatMap((type) => {
+    const value = source[type];
+    if (value == null || !String(value).trim()) return [];
+    return [{ type, value: String(value).trim().slice(0, 255) }];
+  });
+}
+
 async function createShopifyOrder({ items, currency, email, phone, shipping, billing, note, sessionId, discount, chargedCents, attribution }) {
   const charged = Number(chargedCents);
   if (!Number.isInteger(charged) || charged < 0) throw new Error("Invalid signed Stripe amount");
   const noteAttributes = sessionId ? [{ name: "stripe_session_id", value: String(sessionId) }] : [];
+  const googleClickIds = googleAdsClickIds(attribution);
+  if (googleClickIds.length) {
+    noteAttributes.push({ name: "google_ads_paid", value: "yes" });
+    for (const click of googleClickIds) {
+      noteAttributes.push({ name: `google_ads_${click.type}`, value: click.value });
+    }
+  }
   const attributionAttributes = {
     tracking_version: attribution && attribution.tracking_version,
     first_touch_landing: attribution && attribution.first_touch_landing,
@@ -706,7 +726,12 @@ async function createShopifyOrder({ items, currency, email, phone, shipping, bil
     source_identifier: String(sessionId),
     // Shopify tags are limited to 40 characters; keep the full Session ID in
     // source_identifier/note_attributes and use a deterministic short tag.
-    tags: `stripe, stripe_${crypto.createHash("sha256").update(String(sessionId)).digest("hex").slice(0, 32)}`,
+    tags: [
+      "stripe",
+      `stripe_${crypto.createHash("sha256").update(String(sessionId)).digest("hex").slice(0, 32)}`,
+      ...(googleClickIds.length ? ["google_ads_paid"] : []),
+      ...googleClickIds.map((click) => `google_ads_${click.type}`),
+    ].join(", "),
     send_receipt: true,
     send_fulfillment_receipt: false,
     inventory_behaviour: "decrement_obeying_policy",
