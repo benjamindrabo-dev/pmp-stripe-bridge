@@ -35,14 +35,6 @@ async function getAccessToken() {
   return _tok.v;
 }
 
-async function sha256Hex(value) {
-  if (!value) return null;
-  const n = String(value).trim().toLowerCase();
-  if (!n) return null;
-  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(n));
-  return Array.from(new Uint8Array(d)).map(function (b) { return b.toString(16).padStart(2, "0"); }).join("");
-}
-
 export function adsConfigured() {
   return Boolean(
     process.env.GOOGLE_CLIENT_ID &&
@@ -76,8 +68,10 @@ export async function uploadPurchase(opts) {
     conversionValue: Number(opts.value) || 0,
     currency: String(opts.currency || "USD").toUpperCase()
   };
-  const em = await sha256Hex(opts.email);
-  if (em) ev.userData = { userIdentifiers: [{ emailAddress: em }] };
+  // This destination is an "Import from clicks" conversion. The click ID is
+  // the matching key. Adding hashed email userData makes Data Manager treat
+  // BRAID rows as Enhanced Conversions for Leads and reject them when ECFL is
+  // not enabled on the account. Keep this pipeline click-ID-only.
 
   const payload = {
     destinations: [{
@@ -97,10 +91,24 @@ export async function uploadPurchase(opts) {
     body: JSON.stringify(payload)
   });
   const text = await res.text().catch(function () { return ""; });
-  if (!res.ok) throw new Error("dm_ingest_failed status=" + res.status + " " + text.slice(0, 600));
+  // Keep the complete Google BadRequest details. The useful field violation is
+  // often after ErrorInfo/RequestInfo and was previously cut off at 600 chars,
+  // making INVALID_ARGUMENT failures impossible to diagnose from Vercel logs.
+  if (!res.ok) throw new Error("dm_ingest_failed status=" + res.status + " " + text.slice(0, 4000));
 
   let json = {};
   try { json = JSON.parse(text); } catch (e) {}
   const warn = json.fieldWarnings && json.fieldWarnings.length ? JSON.stringify(json.fieldWarnings).slice(0, 400) : null;
+  const partialFailure = json.partialFailureError
+    ? JSON.stringify(json.partialFailureError).slice(0, 4000)
+    : null;
+  if (partialFailure) {
+    return {
+      ok: false,
+      requestId: json.requestId || null,
+      partialFailure,
+      warnings: warn
+    };
+  }
   return { ok: true, requestId: json.requestId || null, warnings: warn };
 }
