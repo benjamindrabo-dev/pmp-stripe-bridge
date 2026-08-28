@@ -1,10 +1,90 @@
 // GET /api/meta-offer-summary.js
 // Storefront helper injected by Shopify ScriptTag.
-// It only changes the custom right-hand order summary for the exact Meta
-// retargeting campaign that the Stripe bridge already discounts by 20%.
+// It sends the selected market country to the checkout bridge, surfaces an
+// exact CAD charge notice when the temporary US override is active, and keeps
+// the existing Meta retargeting discount summary in sync.
 
 const JS = String.raw`(function(){
   'use strict';
+
+  /* ---------- Temporary US display-USD / charge-CAD bridge ---------- */
+  if (!window.__pmpCheckoutCountryBridge) {
+    window.__pmpCheckoutCountryBridge = true;
+    var nativeFetch = window.fetch.bind(window);
+    var currencyNotice = null;
+
+    function selectedCountry(){
+      var selector = document.querySelector('#PmpHeaderCountrySelectorV3');
+      var value = selector && String(selector.value || '').trim().toUpperCase();
+      return /^[A-Z]{2}$/.test(value) ? value : null;
+    }
+
+    function isCheckoutRequest(input, init){
+      if (!init || String(init.method || 'GET').toUpperCase() !== 'POST') return false;
+      var raw = typeof input === 'string' ? input : (input && input.url) || '';
+      try {
+        var url = new URL(raw, location.href);
+        return url.hostname === 'pmp-stripe-bridge.vercel.app' && url.pathname === '/api/create-checkout';
+      } catch (_) { return false; }
+    }
+
+    function formatCad(cents){
+      var value = (Number(cents) || 0) / 100;
+      try { return new Intl.NumberFormat('en-CA', { style: 'currency', currency: 'CAD', currencyDisplay: 'narrowSymbol' }).format(value); }
+      catch (_) { return '$' + value.toFixed(2); }
+    }
+
+    function syncCurrencyNotice(){
+      var old = document.querySelector('[data-pmp-us-cad-notice]');
+      if (!currencyNotice) { if (old) old.remove(); return; }
+
+      var totals = document.querySelector('#pmp-summary .pmp-sum-totals');
+      var totalRow = totals && totals.querySelector('.pmp-sum-total');
+      if (!totalRow) return;
+
+      var notice = old;
+      if (!notice) {
+        notice = document.createElement('div');
+        notice.setAttribute('data-pmp-us-cad-notice', 'true');
+        notice.style.cssText = 'margin-top:10px;padding:10px 12px;border-radius:8px;background:#f4f7f5;color:#20372b;font-size:12px;line-height:1.45;';
+        totalRow.insertAdjacentElement('afterend', notice);
+      }
+      notice.innerHTML = '<strong>Prices shown in USD.</strong><br>Your card will be charged ' +
+        '<strong>' + formatCad(currencyNotice.amountTotal) + ' CAD</strong>, the equivalent amount in Canadian dollars.';
+    }
+
+    window.fetch = function pmpCountryAwareFetch(input, init){
+      if (!isCheckoutRequest(input, init)) return nativeFetch(input, init);
+
+      var nextInit = Object.assign({}, init);
+      try {
+        var body = JSON.parse(String(nextInit.body || '{}'));
+        var country = selectedCountry();
+        if (country) body.checkout_country = country;
+        nextInit.body = JSON.stringify(body);
+      } catch (_) {}
+
+      return nativeFetch(input, nextInit).then(function(response){
+        try {
+          response.clone().json().then(function(data){
+            var amountTotal = Number(data && data.amountTotal);
+            currencyNotice = data && data.temporaryCurrencyOverride && Number.isFinite(amountTotal) && amountTotal > 0 ? {
+              amountTotal: amountTotal,
+              currency: data.currency || 'CAD'
+            } : null;
+            setTimeout(syncCurrencyNotice, 0);
+          }).catch(function(){});
+        } catch (_) {}
+        return response;
+      });
+    };
+
+    new MutationObserver(function(){
+      if (currencyNotice) setTimeout(syncCurrencyNotice, 0);
+    }).observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  /* ---------- Meta WELCOME20 summary ---------- */
   if (window.__pmpMetaOfferSummary) return;
   window.__pmpMetaOfferSummary = true;
 
