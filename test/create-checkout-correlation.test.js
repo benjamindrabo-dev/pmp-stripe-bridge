@@ -199,3 +199,30 @@ test("drops unsafe optional correlation fields and keeps browser-id fallback", a
     clientReferenceId: "browser_123",
   });
 });
+
+test("localizes Stripe Checkout from trusted Shopify locale tags", async (t) => {
+  installEnvironment(t);
+  const calls = mockServices();
+
+  const cases = [
+    ["fr-FR", "fr"],
+    ["de-DE", "de"],
+    ["es-ES", "es"],
+    ["it-IT", "it"],
+    ["pt-PT", "pt"],
+    ["en-GB", "en-GB"],
+    ["unsupported-locale", "en"],
+  ];
+
+  for (const [storefrontLocale, stripeLocale] of cases) {
+    const res = responseHarness();
+    await handler(checkoutRequest({ locale: storefrontLocale }), res);
+    assert.equal(res.statusCode, 200);
+    const stripe = calls.stripe.at(-1);
+    const redis = calls.redis.at(-1);
+    assert.equal(stripe.get("locale"), stripeLocale);
+    assert.equal(stripe.get("metadata[checkout_locale]"), stripeLocale);
+    assert.equal(redis.checkout_locale, stripeLocale);
+    assert.equal(res.payload.checkoutLocale, stripeLocale);
+  }
+});
