@@ -1,49 +1,106 @@
 {% comment %}
-  "Pay with Card (Stripe)" button.
-  Paste into your theme (e.g. sections/main-cart-footer.liquid) and set MIDDLEWARE_URL.
-  Reads the live Shopify cart and hands it to your Stripe middleware.
+  "Pay with Card (Stripe)" Embedded Checkout.
+  Paste into the theme and replace the two YOUR-* placeholders.
+  Upload public/pmp-checkout-events.js as a theme asset first.
 {% endcomment %}
+
+{{ 'pmp-checkout-events.js' | asset_url | script_tag }}
+<script src="https://js.stripe.com/v3/"></script>
 
 <button type="button" id="pay-with-stripe"
   style="width:100%;padding:14px;border:0;border-radius:8px;background:#635bff;color:#fff;font-size:16px;cursor:pointer;">
   Pay with Card
 </button>
-<p id="pay-with-stripe-error" style="color:#c00;display:none;margin-top:8px;"></p>
+<p id="pay-with-stripe-error" role="alert" style="color:#c00;display:none;margin-top:8px;"></p>
+<div id="pmp-stripe-checkout" hidden></div>
 
 <script>
 (function () {
-  var MIDDLEWARE_URL = "https://YOUR-APP.vercel.app/api/create-checkout"; // <-- set this
+  var MIDDLEWARE_URL = "https://YOUR-APP.vercel.app/api/create-checkout";
+  var STRIPE_PUBLISHABLE_KEY = "pk_live_YOUR_KEY";
   var btn = document.getElementById("pay-with-stripe");
   var err = document.getElementById("pay-with-stripe-error");
+  var checkoutContainer = document.getElementById("pmp-stripe-checkout");
+  var embeddedCheckout = null;
+
+  function reportError(stage, error) {
+    if (window.PMPCheckoutEvents) {
+      window.PMPCheckoutEvents.checkoutError({
+        stage: stage,
+        code: error && (error.code || error.status) || "unknown"
+      });
+    }
+  }
 
   btn.addEventListener("click", async function () {
     btn.disabled = true;
-    btn.textContent = "Redirecting…";
+    btn.textContent = "Loading secure checkout…";
     err.style.display = "none";
+    var checkoutResponse = null;
+
     try {
-      var cart = await (await fetch("/cart.js")).json();
+      var cartResponse = await fetch("/cart.js", { credentials: "same-origin" });
+      if (!cartResponse.ok) throw Object.assign(new Error("Could not read cart."), { status: cartResponse.status });
+      var cart = await cartResponse.json();
       if (!cart.items || cart.items.length === 0) throw new Error("Your cart is empty.");
 
-      var items = cart.items.map(function (i) {
+      var items = cart.items.map(function (item) {
         return {
-          variant_id: i.variant_id,
-          title: i.product_title,
-          quantity: i.quantity,
-          price_cents: i.final_price // Shopify cart prices are already in cents
+          variant_id: item.variant_id,
+          title: item.product_title,
+          quantity: item.quantity,
+          price_cents: item.final_price,
+          image: item.image
         };
       });
 
-      var res = await fetch(MIDDLEWARE_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ items: items, note: cart.note || "" })
+      var stripe = window.Stripe(STRIPE_PUBLISHABLE_KEY);
+      embeddedCheckout = await stripe.initEmbeddedCheckout({
+        fetchClientSecret: async function () {
+          var response = await fetch(MIDDLEWARE_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              items: items,
+              currency: cart.currency,
+              note: cart.note || "",
+              shopify_cart_token: cart.token || null,
+              shopify_cart_url: window.location.origin + "/cart"
+            })
+          });
+          var data = await response.json();
+          if (!response.ok || !data.clientSecret) {
+            throw Object.assign(
+              new Error(data.error || "Could not start checkout."),
+              { status: response.status }
+            );
+          }
+          checkoutResponse = data;
+          return data.clientSecret;
+        }
       });
-      var data = await res.json();
-      if (!res.ok || !data.url) throw new Error(data.error || "Could not start checkout.");
-      window.location.href = data.url; // go to Stripe Checkout
-    } catch (e) {
-      err.textContent = e.message || "Something went wrong.";
+
+      checkoutContainer.hidden = false;
+      await Promise.resolve(embeddedCheckout.mount("#pmp-stripe-checkout"));
+
+      // `begin_checkout` describes a checkout the shopper can actually see.
+      // The tracker de-duplicates this across repeated mount callbacks/reloads
+      // using the deterministic event ID returned by the bridge.
+      if (!checkoutResponse || !window.PMPCheckoutEvents ||
+          !window.PMPCheckoutEvents.beginCheckout(checkoutResponse)) {
+        if (!checkoutResponse) throw new Error("Checkout session was not created.");
+      }
+
+      btn.style.display = "none";
+    } catch (error) {
+      reportError(checkoutResponse ? "mount_checkout" : "create_checkout", error);
+      err.textContent = error && error.message || "Something went wrong.";
       err.style.display = "block";
+      checkoutContainer.hidden = true;
+      if (embeddedCheckout && typeof embeddedCheckout.destroy === "function") {
+        embeddedCheckout.destroy();
+        embeddedCheckout = null;
+      }
       btn.disabled = false;
       btn.textContent = "Pay with Card";
     }

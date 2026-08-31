@@ -165,6 +165,15 @@ test("correlates a Shopify cart across Checkout Session, PaymentIntent and Redis
   });
   assert.equal(res.payload.omnisendStarted, false);
   assert.match(res.payload.omnisendEventId, /^[0-9a-f-]{36}$/);
+  assert.match(res.payload.analytics.beginCheckout.eventId, /^[0-9a-f-]{36}$/);
+  assert.equal(res.payload.analytics.beginCheckout.currency, "USD");
+  assert.equal(res.payload.analytics.beginCheckout.value, 31.99);
+  assert.deepEqual(res.payload.analytics.beginCheckout.items, [{
+    item_id: String(VARIANT_ID),
+    item_name: "Cranberry for Dogs",
+    price: 31.99,
+    quantity: 1,
+  }]);
   assert.equal(
     res.payload.abandonedCheckoutURL,
     "https://bridge.example/api/recover-checkout?session_id=cs_correlation",

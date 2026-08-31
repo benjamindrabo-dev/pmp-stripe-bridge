@@ -5,7 +5,7 @@ is not selectable as a native Shopify gateway in Canada. It builds a Stripe
 Checkout Session from the live cart, then rebuilds the paid order in Shopify.
 
 ```
-Shopify cart ──(button)──> /api/create-checkout ──> Stripe Checkout (hosted) ──> customer pays
+Shopify cart ──(button)──> /api/create-checkout ──> Stripe Embedded Checkout ──> customer pays
                                                                                      │
                                                                                      ▼
 Shopify order (paid, inventory decremented) <── /api/stripe-webhook <── checkout.session.completed
@@ -15,7 +15,9 @@ Shopify order (paid, inventory decremented) <── /api/stripe-webhook <── 
 - `api/create-checkout.js` — creates the Stripe Checkout Session.
 - `api/stripe-webhook.js` — on paid session, creates the Shopify order.
 - `api/recover-checkout.js` — rebuilds an abandoned cart across devices from an opaque Stripe Session ID.
+- `api/meta-offer-summary.js` — live Shopify ScriptTag that enriches checkout requests and tracks their successful/failed bridge responses.
 - `lib/omnisend.js` — emits the standard Omnisend `started checkout` event when its API key is configured.
+- `public/pmp-checkout-events.js` — sends an idempotent browser-side GA4/Clarity `begin_checkout` after Embedded Checkout mounts and reports Clarity `checkout_error` events.
 - `shopify-snippet-pay-with-stripe.liquid` — the storefront button.
 - `.env.example` — every secret/config value.
 
@@ -30,7 +32,26 @@ Shopify order (paid, inventory decremented) <── /api/stripe-webhook <── 
 2. Vercel → Project → **Settings → Environment Variables** → add all keys from `.env.example`.
 3. Deploy. Note the URL, e.g. `https://your-app.vercel.app`.
 4. **Stripe → Developers → Webhooks → Add endpoint**: URL `https://your-app.vercel.app/api/stripe-webhook`, event `checkout.session.completed`. Copy the **Signing secret** into `STRIPE_WEBHOOK_SECRET`. Redeploy.
-5. Paste `shopify-snippet-pay-with-stripe.liquid` into your theme; set `MIDDLEWARE_URL` to `https://your-app.vercel.app/api/create-checkout`.
+5. Upload `public/pmp-checkout-events.js` to Shopify theme assets. Paste `shopify-snippet-pay-with-stripe.liquid` into your theme and set `MIDDLEWARE_URL` and `STRIPE_PUBLISHABLE_KEY`.
+
+## Browser funnel events
+
+`/api/create-checkout` returns the validated charge currency, checkout value,
+line items, and a deterministic event ID in `analytics.beginCheckout`. The live
+ScriptTag emits GA4 `begin_checkout` to `G-KKS5T7SPHR` after a successful
+Checkout Session response. The standalone example waits until Stripe Embedded
+Checkout mounts. Both use the same event/session keys, so a memory +
+`sessionStorage` guard prevents the same Stripe session from being counted
+twice across callbacks, integrations, or page reloads. The same successful
+transition emits a Clarity `begin_checkout`; endpoint or mount failures emit
+Clarity `checkout_error` with low-cardinality stage/code tags and no error
+message or customer data. The live ScriptTag also drops the theme's legacy
+`begin_checkout` call only when it has neither `event_id` nor `items`; complete
+bridge events and every other Google tag call pass through unchanged.
+
+Successful Shopify `POST /cart/add.js` and `POST /cart/add` responses emit a
+Clarity `add_to_cart`. No additional GA4 `add_to_cart` is sent because Shopify's
+pixel already owns that event; duplicating it here would inflate the funnel.
 
 ## Checkout correlation and Omnisend
 

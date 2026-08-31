@@ -153,6 +153,18 @@ test("US checkout validates USD, converts against Shopify CAD, and charges CAD",
   assert.equal(calls.stripe[0].get("metadata[charge_currency]"), "CAD");
   assert.equal(calls.redis[0].currency, "cad");
   assert.equal(calls.redis[0].items[0].price_cents, 4500);
+  assert.deepEqual(res.payload.analytics.beginCheckout, {
+    eventId: res.payload.analytics.beginCheckout.eventId,
+    currency: "CAD",
+    value: 45,
+    items: [{
+      item_id: String(VARIANT_ID),
+      item_name: "Cranberry for Dogs",
+      price: 45,
+      quantity: 1,
+    }],
+  });
+  assert.match(res.payload.analytics.beginCheckout.eventId, /^[0-9a-f-]{36}$/);
 });
 
 test("a non-US USD checkout remains in USD", async (t) => {
@@ -166,6 +178,8 @@ test("a non-US USD checkout remains in USD", async (t) => {
   assert.equal(res.payload.currency, "USD");
   assert.equal(res.payload.amountTotal, 3199);
   assert.equal(res.payload.temporaryCurrencyOverride, false);
+  assert.equal(res.payload.analytics.beginCheckout.currency, "USD");
+  assert.equal(res.payload.analytics.beginCheckout.value, 31.99);
   assert.equal(calls.shopify.length, 1);
   assert.equal(calls.stripe[0].get("line_items[0][price_data][currency]"), "usd");
 });
