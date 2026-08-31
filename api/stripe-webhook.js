@@ -680,6 +680,135 @@ function metaAdsClickId(attribution) {
   return value != null && String(value).trim() ? String(value).trim().slice(0, 255) : null;
 }
 
+function compactAttributionValue(value, max = 500) {
+  if (value == null || !String(value).trim()) return null;
+  return String(value).trim().slice(0, max);
+}
+
+function searchEngineFromReferrer(referrer) {
+  if (!referrer) return null;
+  try {
+    const host = new URL(String(referrer)).hostname.toLowerCase().replace(/^www\./, "");
+    if (host === "google.com" || host.startsWith("google.") || host.includes(".google.")) return "Google";
+    if (host === "bing.com" || host.endsWith(".bing.com")) return "Bing";
+    if (host === "search.yahoo.com" || host.endsWith(".search.yahoo.com")) return "Yahoo";
+    if (host === "duckduckgo.com" || host.endsWith(".duckduckgo.com")) return "DuckDuckGo";
+    if (host === "ecosia.org" || host.endsWith(".ecosia.org")) return "Ecosia";
+    if (host === "baidu.com" || host.endsWith(".baidu.com")) return "Baidu";
+    if (host === "yandex.com" || host.startsWith("yandex.") || host.includes(".yandex.")) return "Yandex";
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function externalReferrerHost(referrer) {
+  if (!referrer) return null;
+  try {
+    const host = new URL(String(referrer)).hostname.toLowerCase().replace(/^www\./, "");
+    if (!host || host === "puremajestypet.com" || host.endsWith(".puremajestypet.com")) return null;
+    return host;
+  } catch {
+    return null;
+  }
+}
+
+// Human-readable channel for the Shopify order screen. This is deliberately
+// labelled as inferred when browser signals describe a channel but do not
+// constitute platform-side proof of attribution.
+export function classifyEntryChannel({ attribution, source, medium, campaign, referrer }) {
+  const data = attribution || {};
+  if (googleAdsClickIds(data).length) return { label: "Google Ads (paid)", seo: false };
+  if (metaAdsClickId(data)) return { label: "Meta Ads (paid)", seo: false };
+
+  const src = String(source || "").trim().toLowerCase();
+  const med = String(medium || "").trim().toLowerCase();
+  const camp = String(campaign || "").trim().toLowerCase();
+  const content = String(data.utm_content || "").trim().toLowerCase();
+  const engine = searchEngineFromReferrer(referrer) ||
+    (src.includes("google") ? "Google" : src.includes("bing") ? "Bing" : src.includes("yahoo") ? "Yahoo" : null);
+
+  // Shopify's Google product-sync links commonly carry these exact values.
+  // They are kept distinct from classic SEO because a free product listing is
+  // not the same acquisition surface as a normal organic search result.
+  if (src.includes("google") && (med === "product_sync" || camp.includes("sag_organic") || content.includes("sag_organic"))) {
+    return { label: "Google free listing (inferred)", seo: false };
+  }
+  if (/^(cpc|ppc|paid|paid_search|paidsearch|sem)$/.test(med) || med.includes("paid_search")) {
+    return { label: `${engine || source || "Search"} Ads (paid)`, seo: false };
+  }
+  if (med === "paid_social" || med.includes("paid-social")) {
+    return { label: `${source || "Social"} Ads (paid)`, seo: false };
+  }
+  if (med === "organic" || med === "organic_search" || (engine && !med && !camp)) {
+    return { label: `${engine || source || "Search"} organic search / SEO (inferred)`, seo: true };
+  }
+  if (med === "email" || src.includes("email") || src.includes("omnisend")) {
+    return { label: "Email", seo: false };
+  }
+  if (med === "organic_social" || med === "social") {
+    return { label: `${source || "Social"} organic social (inferred)`, seo: false };
+  }
+  const referrerHost = externalReferrerHost(referrer);
+  if (referrerHost) return { label: `Referral: ${referrerHost}`, seo: false };
+  if (source || medium) return { label: [source, medium].filter(Boolean).join(" / "), seo: false };
+  return { label: "Direct / unknown", seo: false };
+}
+
+export function entryAttributionAttributes(attribution) {
+  const data = attribution || {};
+  const hasFirstTouch = Boolean(
+    data.first_touch_landing || data.first_touch_referrer || data.first_touch_source ||
+    data.first_touch_medium || data.first_touch_campaign,
+  );
+  const entryPage = compactAttributionValue(
+    data.first_touch_landing || data.landing_page || data.landing_url || data.last_touch_landing,
+  );
+  const entryReferrer = compactAttributionValue(
+    data.first_touch_referrer || data.referrer || data.last_touch_referrer,
+  );
+  const source = compactAttributionValue(
+    data.first_touch_source || data.utm_source || data.last_touch_source,
+    100,
+  );
+  const medium = compactAttributionValue(
+    data.first_touch_medium || data.utm_medium || data.last_touch_medium,
+    100,
+  );
+  const campaign = compactAttributionValue(
+    data.first_touch_campaign || data.utm_campaign || data.last_touch_campaign,
+    200,
+  );
+  const hasSignal = Boolean(
+    entryPage || entryReferrer || source || medium || campaign ||
+    googleAdsClickIds(data).length || metaAdsClickId(data),
+  );
+  if (!hasSignal) return {};
+
+  // A later paid click must not overwrite a recorded first-touch organic
+  // entry. When first-touch fields exist, classify only those fields; when
+  // they do not, use the current-session click IDs and UTM values.
+  const channelData = hasFirstTouch ? {
+    ...data,
+    gclid: null,
+    gbraid: null,
+    wbraid: null,
+    fbc: null,
+    utm_content: null,
+  } : data;
+  const channel = classifyEntryChannel({ attribution: channelData, source, medium, campaign, referrer: entryReferrer });
+  return {
+    entry_page: entryPage,
+    entry_basis: hasFirstTouch ? "first_touch" : (entryPage ? "session_landing" : null),
+    entry_referrer: entryReferrer,
+    entry_channel: channel.label,
+    entry_source: source,
+    entry_medium: medium,
+    entry_campaign: campaign,
+    seo_organic: channel.seo ? "yes (inferred)" : null,
+  };
+}
+
 async function createShopifyOrder({ items, currency, email, phone, shipping, billing, note, sessionId, discount, chargedCents, attribution }) {
   const charged = Number(chargedCents);
   if (!Number.isInteger(charged) || charged < 0) throw new Error("Invalid signed Stripe amount");
@@ -708,6 +837,7 @@ async function createShopifyOrder({ items, currency, email, phone, shipping, bil
   }
   const attributionAttributes = {
     tracking_version: attribution && attribution.tracking_version,
+    ...entryAttributionAttributes(attribution),
     first_touch_landing: attribution && attribution.first_touch_landing,
     first_touch_referrer: attribution && attribution.first_touch_referrer,
     first_touch_source: attribution && attribution.first_touch_source,
