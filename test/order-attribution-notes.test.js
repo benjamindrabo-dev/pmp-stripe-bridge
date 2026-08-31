@@ -14,6 +14,8 @@ test("surfaces a Google free product listing without labelling it as SEO", () =>
   }), {
     entry_page: "https://www.puremajestypet.com/products/liquid-collagen-for-dogs",
     entry_basis: "session_landing",
+    entry_page_type: "product",
+    entry_page_handle: "liquid-collagen-for-dogs",
     entry_referrer: "https://www.google.com/",
     entry_channel: "Google free listing (inferred)",
     entry_source: "google",
@@ -30,6 +32,8 @@ test("marks an untagged search-engine visit as inferred organic SEO", () => {
   }), {
     entry_page: "https://www.puremajestypet.com/blogs/news/dog-yeast-infection-treatment",
     entry_basis: "session_landing",
+    entry_page_type: "article",
+    entry_page_handle: "dog-yeast-infection-treatment",
     entry_referrer: "https://www.google.ca/",
     entry_channel: "Google organic search / SEO (inferred)",
     entry_source: null,
@@ -65,6 +69,8 @@ test("keeps a recorded first-touch SEO entry when a later touch has a paid click
 
   assert.equal(attributes.entry_page, "https://www.puremajestypet.com/blogs/news/dog-yeast-infection-treatment");
   assert.equal(attributes.entry_basis, "first_touch");
+  assert.equal(attributes.entry_page_type, "article");
+  assert.equal(attributes.entry_page_handle, "dog-yeast-infection-treatment");
   assert.equal(attributes.entry_channel, "Google organic search / SEO (inferred)");
   assert.equal(attributes.seo_organic, "yes (inferred)");
 });

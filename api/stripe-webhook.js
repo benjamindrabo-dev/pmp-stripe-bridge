@@ -713,6 +713,23 @@ function externalReferrerHost(referrer) {
   }
 }
 
+export function entryPageIdentity(pageUrl) {
+  if (!pageUrl) return { type: null, handle: null };
+  try {
+    const segments = new URL(String(pageUrl)).pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    if (!segments.length) return { type: "homepage", handle: null };
+    if (segments[0] === "blogs" && segments.length >= 3) {
+      return { type: "article", handle: segments.slice(2).join("/") };
+    }
+    if (segments[0] === "products" && segments[1]) return { type: "product", handle: segments.slice(1).join("/") };
+    if (segments[0] === "collections" && segments[1]) return { type: "collection", handle: segments.slice(1).join("/") };
+    if (segments[0] === "pages" && segments[1]) return { type: "page", handle: segments.slice(1).join("/") };
+    return { type: segments[0], handle: segments.slice(1).join("/") || null };
+  } catch {
+    return { type: null, handle: null };
+  }
+}
+
 // Human-readable channel for the Shopify order screen. This is deliberately
 // labelled as inferred when browser signals describe a channel but do not
 // constitute platform-side proof of attribution.
@@ -797,9 +814,12 @@ export function entryAttributionAttributes(attribution) {
     utm_content: null,
   } : data;
   const channel = classifyEntryChannel({ attribution: channelData, source, medium, campaign, referrer: entryReferrer });
+  const pageIdentity = entryPageIdentity(entryPage);
   return {
     entry_page: entryPage,
     entry_basis: hasFirstTouch ? "first_touch" : (entryPage ? "session_landing" : null),
+    entry_page_type: pageIdentity.type,
+    entry_page_handle: pageIdentity.handle,
     entry_referrer: entryReferrer,
     entry_channel: channel.label,
     entry_source: source,
