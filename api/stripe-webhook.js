@@ -658,31 +658,92 @@ async function recoverCartFromStripe(session) {
   return { items, currency: String(session.currency || "USD").toLowerCase(), note: "Recovered from Stripe Session metadata" };
 }
 
-// Google click identifiers are captured durably on the Stripe Checkout Session.
-// Mirror them onto the Shopify order so the sales team can filter paid Google
-// orders without opening Stripe. More than one identifier can be present on a
-// session, so retain each one rather than picking an arbitrary winner.
-function googleAdsClickIds(attribution) {
-  const source = attribution || {};
-  return ["gclid", "gbraid", "wbraid"].flatMap((type) => {
-    const value = source[type];
-    if (value == null || !String(value).trim()) return [];
-    return [{ type, value: String(value).trim().slice(0, 255) }];
-  });
+const ATTRIBUTION_MODEL = "last_paid_else_first_free_v1";
+const EMAIL_LIKE = /[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+/i;
+
+function containsEmail(value) {
+  if (value == null) return false;
+  let candidate = String(value);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (EMAIL_LIKE.test(candidate)) return true;
+    try {
+      const decoded = decodeURIComponent(candidate);
+      if (decoded === candidate) break;
+      candidate = decoded;
+    } catch {
+      break;
+    }
+  }
+  return EMAIL_LIKE.test(candidate);
 }
 
-// `fbp` only identifies a browser with the Meta pixel; it exists on paid and
-// unpaid traffic alike. `fbc` is the click identifier derived from Meta's
-// fbclid parameter, so it is the only Meta value used to mark an ad-attributed
-// order in Shopify.
-function metaAdsClickId(attribution) {
-  const value = attribution && attribution.fbc;
-  return value != null && String(value).trim() ? String(value).trim().slice(0, 255) : null;
+// Attribution is copied from a browser-controlled request to Stripe metadata,
+// then to Shopify. Validate it again at this final trust boundary: reports and
+// order notes must never become a store for email addresses or arbitrary text.
+function safeAttributionText(value, max = 500) {
+  if (value == null) return null;
+  const clean = String(value).trim().replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ");
+  if (!clean || containsEmail(clean)) return null;
+  return clean.slice(0, max);
 }
 
-function compactAttributionValue(value, max = 500) {
+function safeAttributionUrl(value, max = 500) {
   if (value == null || !String(value).trim()) return null;
-  return String(value).trim().slice(0, max);
+  try {
+    const url = new URL(String(value).trim());
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    url.username = "";
+    url.password = "";
+    url.hash = "";
+    url.search = "";
+    // A storefront path can accidentally contain an email (for example an
+    // email-platform preview URL). Keep only the harmless origin.
+    if (containsEmail(url.pathname)) url.pathname = "/";
+    return `${url.origin}${url.pathname}`.slice(0, max);
+  } catch {
+    return null;
+  }
+}
+
+function safeAttributionAt(value) {
+  const text = safeAttributionText(value, 40);
+  if (!text) return null;
+  const time = Date.parse(text);
+  return Number.isFinite(time) ? new Date(time).toISOString() : null;
+}
+
+function safeClickId(value) {
+  const text = safeAttributionText(value, 255);
+  if (!text || text.length < 6 || !/^[A-Za-z0-9._~-]+$/.test(text)) return null;
+  return text;
+}
+
+function safeFacebookBrowserId(value) {
+  const text = safeAttributionText(value, 300);
+  if (!text) return null;
+  const match = /^fb\.1\.(\d{10,16})\.([A-Za-z0-9._~-]{6,200})$/.exec(text);
+  return match ? text : null;
+}
+
+// Google, Microsoft and TikTok click IDs are deterministic paid-click proof.
+// Meta's fbc/fbclid are retained for matching, but are deliberately NOT proof
+// of paid traffic: organic Facebook and Instagram links can carry fbclid too.
+function validatedClickIds(attribution) {
+  const data = attribution || {};
+  return {
+    gclid: safeClickId(data.gclid),
+    gbraid: safeClickId(data.gbraid),
+    wbraid: safeClickId(data.wbraid),
+    msclkid: safeClickId(data.msclkid),
+    ttclid: safeClickId(data.ttclid),
+    fbclid: safeClickId(data.fbclid),
+    fbc: safeFacebookBrowserId(data.fbc),
+  };
+}
+
+function googleAdsClickIds(attribution) {
+  const ids = validatedClickIds(attribution);
+  return ["gclid", "gbraid", "wbraid"].flatMap((type) => ids[type] ? [{ type, value: ids[type] }] : []);
 }
 
 function searchEngineFromReferrer(referrer) {
@@ -730,106 +791,254 @@ export function entryPageIdentity(pageUrl) {
   }
 }
 
-// Human-readable channel for the Shopify order screen. This is deliberately
-// labelled as inferred when browser signals describe a channel but do not
-// constitute platform-side proof of attribution.
-export function classifyEntryChannel({ attribution, source, medium, campaign, referrer }) {
-  const data = attribution || {};
-  if (googleAdsClickIds(data).length) return { label: "Google Ads (paid)", seo: false };
-  if (metaAdsClickId(data)) return { label: "Meta Ads (paid)", seo: false };
+function normalizeAttributionToken(value) {
+  return String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+}
 
-  const src = String(source || "").trim().toLowerCase();
-  const med = String(medium || "").trim().toLowerCase();
-  const camp = String(campaign || "").trim().toLowerCase();
-  const content = String(data.utm_content || "").trim().toLowerCase();
+function paidMedium(medium) {
+  const med = normalizeAttributionToken(medium);
+  return new Set([
+    "paid", "cpc", "ppc", "paid_social", "paid_search", "paidsearch",
+    "sem", "display", "retargeting", "remarketing", "cpm",
+  ]).has(med);
+}
+
+function sourcePlatform(source) {
+  const src = normalizeAttributionToken(source);
+  if (["google", "google_ads", "adwords"].includes(src) || src.startsWith("google_")) return "google";
+  if (["meta", "facebook", "instagram", "fb", "ig"].includes(src) || /(^|_)(facebook|instagram)($|_)/.test(src)) return "meta";
+  if (["microsoft", "microsoft_ads", "bing", "bing_ads"].includes(src)) return "microsoft";
+  if (["tiktok", "tik_tok", "tiktok_ads"].includes(src)) return "tiktok";
+  return null;
+}
+
+function socialSourceLabel(source) {
+  const src = normalizeAttributionToken(source);
+  if (src === "instagram" || src === "ig") return "Instagram";
+  if (src === "facebook" || src === "fb") return "Facebook";
+  if (src === "meta") return "Meta";
+  if (src === "tiktok" || src === "tik_tok") return "TikTok";
+  return safeAttributionText(source, 100) || "Social";
+}
+
+function paidPlatformLabel(platform, source) {
+  if (platform === "google") return "Google Ads (paid)";
+  if (platform === "meta") return "Meta Ads (paid)";
+  if (platform === "microsoft") return "Microsoft Ads (paid)";
+  if (platform === "tiktok") return "TikTok Ads (paid)";
+  return `${safeAttributionText(source, 100) || "Paid"} Ads (paid)`;
+}
+
+function touchFrom(attribution, prefix) {
+  const data = attribution || {};
+  const key = (name) => prefix ? `${prefix}_${name}` : name;
+  const landingValue = prefix
+    ? (data[key("landing")] || data[key("landing_url")])
+    : (data.landing_page || data.landing_url);
+  return {
+    landing: safeAttributionUrl(landingValue),
+    referrer: safeAttributionUrl(data[key("referrer")]),
+    source: safeAttributionText(prefix ? data[key("source")] : data.utm_source, 100),
+    medium: safeAttributionText(prefix ? data[key("medium")] : data.utm_medium, 100),
+    campaign: safeAttributionText(prefix ? data[key("campaign")] : data.utm_campaign, 200),
+    at: safeAttributionAt(prefix ? data[key("at")] : (data.bridge_started_at || data.captured_at)),
+    content: safeAttributionText(prefix ? data[key("content")] : data.utm_content, 200),
+  };
+}
+
+function touchHasSignal(touch) {
+  return Boolean(touch && (touch.landing || touch.referrer || touch.source || touch.medium || touch.campaign));
+}
+
+function identifiableFreeTouch(touch, channel) {
+  if (!touchHasSignal(touch) || !channel || channel.paid) return false;
+  // A landing URL by itself is only a direct session, not an identifiable
+  // acquisition click. Source/medium/campaign or an external referrer is
+  // required before we call a touch "first free".
+  const meaningful = (value) => {
+    const token = normalizeAttributionToken(value).replace(/[()]/g, "");
+    return Boolean(token && !["direct", "none", "unknown", "not_set", "unset"].includes(token));
+  };
+  return Boolean(
+    meaningful(touch.source) || meaningful(touch.medium) || meaningful(touch.campaign) ||
+    externalReferrerHost(touch.referrer),
+  );
+}
+
+// Human-readable channel for the Shopify order screen. Browser-only channel
+// signals are labelled as inferred; validated ad IDs and explicit paid UTMs
+// are sufficient to classify a paid click.
+export function classifyEntryChannel({ attribution, source, medium, campaign, referrer, content, allowClickIds = true }) {
+  const data = attribution || {};
+  const ids = validatedClickIds(data);
+  const src = normalizeAttributionToken(source);
+  const med = normalizeAttributionToken(medium);
+  const camp = normalizeAttributionToken(campaign);
+  const normalizedContent = normalizeAttributionToken(content || data.utm_content);
+  let platform = sourcePlatform(src);
+
+  if (allowClickIds && !platform) {
+    if (ids.gclid || ids.gbraid || ids.wbraid) platform = "google";
+    else if (ids.msclkid) platform = "microsoft";
+    else if (ids.ttclid) platform = "tiktok";
+  }
+  const hasPaidProof = allowClickIds && Boolean(ids.gclid || ids.gbraid || ids.wbraid || ids.msclkid || ids.ttclid);
+  if (hasPaidProof || paidMedium(med)) {
+    return { label: paidPlatformLabel(platform, source), seo: false, freeListing: false, paid: true, platform };
+  }
+
   const engine = searchEngineFromReferrer(referrer) ||
     (src.includes("google") ? "Google" : src.includes("bing") ? "Bing" : src.includes("yahoo") ? "Yahoo" : null);
 
   // Shopify's Google product-sync links commonly carry these exact values.
   // They are kept distinct from classic SEO because a free product listing is
   // not the same acquisition surface as a normal organic search result.
-  if (src.includes("google") && (med === "product_sync" || camp.includes("sag_organic") || content.includes("sag_organic"))) {
-    return { label: "Google free listing (inferred)", seo: false };
-  }
-  if (/^(cpc|ppc|paid|paid_search|paidsearch|sem)$/.test(med) || med.includes("paid_search")) {
-    return { label: `${engine || source || "Search"} Ads (paid)`, seo: false };
-  }
-  if (med === "paid_social" || med.includes("paid-social")) {
-    return { label: `${source || "Social"} Ads (paid)`, seo: false };
+  if (src.includes("google") && (med === "product_sync" || camp.includes("sag_organic") || normalizedContent.includes("sag_organic"))) {
+    return { label: "Google free listing (inferred)", seo: false, freeListing: true, paid: false, platform: "google" };
   }
   if (med === "organic" || med === "organic_search" || (engine && !med && !camp)) {
-    return { label: `${engine || source || "Search"} organic search / SEO (inferred)`, seo: true };
+    return { label: `${engine || source || "Search"} organic search / SEO (inferred)`, seo: true, freeListing: false, paid: false, platform };
   }
   if (med === "email" || src.includes("email") || src.includes("omnisend")) {
-    return { label: "Email", seo: false };
+    return { label: "Email", seo: false, freeListing: false, paid: false, platform: null };
+  }
+  if (["dm", "direct_message", "direct_messages"].includes(med)) {
+    return { label: `${socialSourceLabel(source)} DM`, seo: false, freeListing: false, paid: false, platform };
   }
   if (med === "organic_social" || med === "social") {
-    return { label: `${source || "Social"} organic social (inferred)`, seo: false };
+    return { label: `${socialSourceLabel(source)} organic social (inferred)`, seo: false, freeListing: false, paid: false, platform };
   }
   const referrerHost = externalReferrerHost(referrer);
-  if (referrerHost) return { label: `Referral: ${referrerHost}`, seo: false };
-  if (source || medium) return { label: [source, medium].filter(Boolean).join(" / "), seo: false };
-  return { label: "Direct / unknown", seo: false };
+  if (referrerHost) return { label: `Referral: ${referrerHost}`, seo: false, freeListing: false, paid: false, platform: null };
+  if (source || medium) return { label: [source, medium].filter(Boolean).join(" / "), seo: false, freeListing: false, paid: false, platform };
+  return { label: "Direct / unknown", seo: false, freeListing: false, paid: false, platform: null };
 }
 
 export function entryAttributionAttributes(attribution) {
   const data = attribution || {};
-  const hasFirstTouch = Boolean(
-    data.first_touch_landing || data.first_touch_referrer || data.first_touch_source ||
-    data.first_touch_medium || data.first_touch_campaign,
-  );
-  const entryPage = compactAttributionValue(
-    data.first_touch_landing || data.landing_page || data.landing_url || data.last_touch_landing,
-  );
-  const entryReferrer = compactAttributionValue(
-    data.first_touch_referrer || data.referrer || data.last_touch_referrer,
-  );
-  const source = compactAttributionValue(
-    data.first_touch_source || data.utm_source || data.last_touch_source,
-    100,
-  );
-  const medium = compactAttributionValue(
-    data.first_touch_medium || data.utm_medium || data.last_touch_medium,
-    100,
-  );
-  const campaign = compactAttributionValue(
-    data.first_touch_campaign || data.utm_campaign || data.last_touch_campaign,
-    200,
-  );
-  const hasSignal = Boolean(
-    entryPage || entryReferrer || source || medium || campaign ||
-    googleAdsClickIds(data).length || metaAdsClickId(data),
-  );
-  if (!hasSignal) return {};
-
-  // A later paid click must not overwrite a recorded first-touch organic
-  // entry. When first-touch fields exist, classify only those fields; when
-  // they do not, use the current-session click IDs and UTM values.
-  const channelData = hasFirstTouch ? {
-    ...data,
-    gclid: null,
-    gbraid: null,
-    wbraid: null,
-    fbc: null,
-    utm_content: null,
-  } : data;
-  const channel = classifyEntryChannel({ attribution: channelData, source, medium, campaign, referrer: entryReferrer });
-  const pageIdentity = entryPageIdentity(entryPage);
+  const firstEntry = touchFrom(data, "first_entry");
+  const firstFree = touchFrom(data, "first_touch");
+  const session = touchFrom(data, "");
+  const entry = touchHasSignal(firstEntry) ? firstEntry : (touchHasSignal(firstFree) ? firstFree : session);
+  if (!touchHasSignal(entry) && !googleAdsClickIds(data).length) return {};
+  const entryBasis = touchHasSignal(firstEntry) ? "first_entry" : (touchHasSignal(firstFree) ? "first_touch" : "session_landing");
+  const channel = classifyEntryChannel({
+    attribution: data,
+    source: entry.source,
+    medium: entry.medium,
+    campaign: entry.campaign,
+    referrer: entry.referrer,
+    content: entry.content,
+    allowClickIds: entryBasis === "session_landing",
+  });
+  const pageIdentity = entryPageIdentity(entry.landing);
   return {
-    entry_page: entryPage,
-    entry_basis: hasFirstTouch ? "first_touch" : (entryPage ? "session_landing" : null),
+    entry_page: entry.landing,
+    entry_basis: entryBasis,
     entry_page_type: pageIdentity.type,
     entry_page_handle: pageIdentity.handle,
-    entry_referrer: entryReferrer,
+    entry_referrer: entry.referrer,
     entry_channel: channel.label,
-    entry_source: source,
-    entry_medium: medium,
-    entry_campaign: campaign,
+    entry_source: entry.source,
+    entry_medium: entry.medium,
+    entry_campaign: entry.campaign,
     seo_organic: channel.seo ? "yes (inferred)" : null,
   };
 }
 
-async function createShopifyOrder({ items, currency, email, phone, shipping, billing, note, sessionId, discount, chargedCents, attribution }) {
+function touchAttributes(prefix, touch) {
+  return {
+    [`${prefix}_landing`]: touch.landing,
+    [`${prefix}_referrer`]: touch.referrer,
+    [`${prefix}_source`]: touch.source,
+    [`${prefix}_medium`]: touch.medium,
+    [`${prefix}_campaign`]: touch.campaign,
+    [`${prefix}_at`]: touch.at,
+  };
+}
+
+export function orderAttributionAttributes(attribution) {
+  const data = attribution || {};
+  const firstEntry = touchFrom(data, "first_entry");
+  const firstFree = touchFrom(data, "first_touch");
+  const lastPaid = touchFrom(data, "last_touch");
+  const session = touchFrom(data, "");
+
+  const classify = (touch, allowClickIds) => classifyEntryChannel({
+    attribution: data,
+    source: touch.source,
+    medium: touch.medium,
+    campaign: touch.campaign,
+    referrer: touch.referrer,
+    content: touch.content,
+    allowClickIds,
+  });
+  const lastPaidChannel = classify(lastPaid, true);
+  const sessionChannel = classify(session, true);
+  const firstFreeChannel = classify(firstFree, false);
+  const firstEntryChannel = classify(firstEntry, false);
+
+  let primary = session;
+  let primaryChannel = sessionChannel;
+  let basis = "current_session";
+  let basisLabel = "current session";
+  // last_touch is the canonical latest paid click. Current-session paid data
+  // is the compatibility fallback for checkouts created by an older client.
+  if (touchHasSignal(lastPaid) && lastPaidChannel.paid) {
+    primary = lastPaid;
+    primaryChannel = lastPaidChannel;
+    basis = "last_paid_click";
+    basisLabel = "last paid click";
+  } else if (sessionChannel.paid) {
+    basis = "last_paid_click";
+    basisLabel = "last paid click";
+  } else if (identifiableFreeTouch(firstFree, firstFreeChannel)) {
+    primary = firstFree;
+    primaryChannel = firstFreeChannel;
+    basis = "first_free_click";
+    basisLabel = "first free click";
+  } else if (identifiableFreeTouch(firstEntry, firstEntryChannel)) {
+    primary = firstEntry;
+    primaryChannel = firstEntryChannel;
+    basis = "first_free_click";
+    basisLabel = "first free click";
+  }
+
+  const legacyEntry = entryAttributionAttributes(data);
+  const firstEntryIsFree = identifiableFreeTouch(firstEntry, firstEntryChannel);
+  const firstFreeEffective = identifiableFreeTouch(firstFree, firstFreeChannel)
+    ? firstFree : (firstEntryIsFree ? firstEntry : null);
+  const lastPaidEffective = touchHasSignal(lastPaid) && lastPaidChannel.paid
+    ? lastPaid : (sessionChannel.paid ? session : null);
+  return {
+    attributes: {
+      tracking_version: safeAttributionText(data.tracking_version, 40),
+      attribution_model: ATTRIBUTION_MODEL,
+      attribution_basis: basis,
+      attribution_channel: primaryChannel.label,
+      attribution_landing: primary.landing,
+      attribution_referrer: primary.referrer,
+      attribution_source: primary.source,
+      attribution_medium: primary.medium,
+      attribution_campaign: primary.campaign,
+      attribution_at: primary.at,
+      ...touchAttributes("first_entry", firstEntry),
+      first_entry_channel: touchHasSignal(firstEntry) ? firstEntryChannel.label : null,
+      ...legacyEntry,
+      ...touchAttributes("first_touch", firstFree),
+      ...touchAttributes("last_touch", lastPaid),
+      ...(firstFreeEffective ? touchAttributes("first_free", firstFreeEffective) : {}),
+      ...(lastPaidEffective ? touchAttributes("last_paid", lastPaidEffective) : {}),
+    },
+    basis,
+    basisLabel,
+    primary,
+    channel: primaryChannel,
+    firstEntry,
+  };
+}
+
+export async function createShopifyOrder({ items, currency, email, phone, shipping, billing, note, sessionId, discount, chargedCents, attribution }) {
   const charged = Number(chargedCents);
   if (!Number.isInteger(charged) || charged < 0) throw new Error("Invalid signed Stripe amount");
   const noteAttributes = sessionId ? [{ name: "stripe_session_id", value: String(sessionId) }] : [];
@@ -839,41 +1048,44 @@ async function createShopifyOrder({ items, currency, email, phone, shipping, bil
     bridge_started_at: attribution && attribution.bridge_started_at,
   };
   Object.entries(bridgeCorrelation).forEach(([name, value]) => {
-    if (value != null && String(value).trim()) {
-      noteAttributes.push({ name, value: String(value).trim().slice(0, 500) });
-    }
+    const clean = safeAttributionText(value, 500);
+    if (clean) noteAttributes.push({ name, value: clean });
   });
+  const attributionSummary = orderAttributionAttributes(attribution);
+  const clickIds = validatedClickIds(attribution);
   const googleClickIds = googleAdsClickIds(attribution);
-  const metaClickId = metaAdsClickId(attribution);
-  if (googleClickIds.length) {
-    noteAttributes.push({ name: "google_ads_paid", value: "yes" });
-    for (const click of googleClickIds) {
-      noteAttributes.push({ name: `google_ads_${click.type}`, value: click.value });
+  for (const click of googleClickIds) {
+    noteAttributes.push({ name: `google_ads_${click.type}`, value: click.value });
+  }
+  if (clickIds.msclkid) noteAttributes.push({ name: "microsoft_ads_msclkid", value: clickIds.msclkid });
+  if (clickIds.ttclid) noteAttributes.push({ name: "tiktok_ads_ttclid", value: clickIds.ttclid });
+  // Neutral names are intentional: fbc/fbclid alone do not prove an ad click.
+  if (clickIds.fbc) noteAttributes.push({ name: "meta_fbc", value: clickIds.fbc });
+  if (clickIds.fbclid) noteAttributes.push({ name: "meta_fbclid", value: clickIds.fbclid });
+
+  const paidPlatform = attributionSummary.channel.paid ? attributionSummary.channel.platform : null;
+  if (paidPlatform) {
+    noteAttributes.push({ name: `${paidPlatform}_ads_paid`, value: "yes" });
+    if (paidPlatform === "meta" && clickIds.fbc) {
+      noteAttributes.push({ name: "meta_ads_fbc", value: clickIds.fbc });
     }
   }
-  if (metaClickId) {
-    noteAttributes.push({ name: "meta_ads_paid", value: "yes" });
-    noteAttributes.push({ name: "meta_ads_fbc", value: metaClickId });
-  }
-  const attributionAttributes = {
-    tracking_version: attribution && attribution.tracking_version,
-    ...entryAttributionAttributes(attribution),
-    first_touch_landing: attribution && attribution.first_touch_landing,
-    first_touch_referrer: attribution && attribution.first_touch_referrer,
-    first_touch_source: attribution && attribution.first_touch_source,
-    first_touch_medium: attribution && attribution.first_touch_medium,
-    first_touch_campaign: attribution && attribution.first_touch_campaign,
-    first_touch_at: attribution && attribution.first_touch_at,
-    last_touch_landing: attribution && attribution.last_touch_landing,
-    last_touch_referrer: attribution && attribution.last_touch_referrer,
-    last_touch_source: attribution && attribution.last_touch_source,
-    last_touch_medium: attribution && attribution.last_touch_medium,
-    last_touch_campaign: attribution && attribution.last_touch_campaign,
-    last_touch_at: attribution && attribution.last_touch_at,
-  };
-  Object.entries(attributionAttributes).forEach(([name, value]) => {
+  Object.entries(attributionSummary.attributes).forEach(([name, value]) => {
     if (value != null && String(value).trim()) noteAttributes.push({ name, value: String(value).trim().slice(0, 500) });
   });
+
+  const acquisitionParts = [`Acquisition: ${attributionSummary.channel.label} (${attributionSummary.basisLabel}).`];
+  if (attributionSummary.primary.landing) acquisitionParts.push(`Page: ${attributionSummary.primary.landing}.`);
+  if (attributionSummary.firstEntry.landing) acquisitionParts.push(`First entry: ${attributionSummary.firstEntry.landing}.`);
+  const acquisitionNote = acquisitionParts.join(" ");
+
+  const attributionTags = [
+    attributionSummary.basis === "last_paid_click" ? "attribution_last_paid" :
+      attributionSummary.basis === "first_free_click" ? "attribution_first_free" : "attribution_session",
+    ...(paidPlatform ? [`${paidPlatform}_ads_paid`] : []),
+    ...(attributionSummary.channel.freeListing ? ["google_free_listing"] : []),
+    ...(attributionSummary.channel.seo ? ["seo_organic"] : []),
+  ];
 
   const order = {
     line_items: items.map((it) => {
@@ -894,7 +1106,7 @@ async function createShopifyOrder({ items, currency, email, phone, shipping, bil
     }],
     email: email || undefined,
     phone: phone || undefined,
-    note: `Paid via Stripe (${(currency || "").toUpperCase()}). Stripe session: ${sessionId || "n/a"}. ${note || ""}`.trim(),
+    note: `Paid via Stripe (${(currency || "").toUpperCase()}). Stripe session: ${sessionId || "n/a"}. ${acquisitionNote} ${note || ""}`.trim(),
     // Machine-readable link back to the Stripe payment (refunds, dedup, audits).
     note_attributes: noteAttributes.length ? noteAttributes : undefined,
     source_identifier: String(sessionId),
@@ -903,9 +1115,7 @@ async function createShopifyOrder({ items, currency, email, phone, shipping, bil
     tags: [
       "stripe",
       `stripe_${crypto.createHash("sha256").update(String(sessionId)).digest("hex").slice(0, 32)}`,
-      ...(googleClickIds.length ? ["google_ads_paid"] : []),
-      ...googleClickIds.map((click) => `google_ads_${click.type}`),
-      ...(metaClickId ? ["meta_ads_paid", "meta_ads_fbc"] : []),
+      ...attributionTags,
     ].join(", "),
     send_receipt: true,
     send_fulfillment_receipt: false,

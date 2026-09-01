@@ -141,6 +141,7 @@ test("correlates a Shopify cart across Checkout Session, PaymentIntent and Redis
   assert.equal(stripe.get("customer_email"), "shopper+bridge@example.com");
   assert.equal(stripe.get("client_reference_id"), "cart_abc123");
   assert.equal(stripe.get("metadata[email]"), null);
+  assert.equal(stripe.get("metadata[tracking_version]"), "pmp_v4");
   assert.equal(stripe.get("metadata[email_sha256]"), emailSha256);
   assert.equal(stripe.get("metadata[shopify_cart_token]"), "cart_abc123");
   assert.equal(stripe.get("metadata[shopify_cart_url]"), "https://shop.example/cart?view=bridge");
@@ -155,6 +156,7 @@ test("correlates a Shopify cart across Checkout Session, PaymentIntent and Redis
   assert.equal(calls.redis[0].shopify_cart_token, "cart_abc123");
   assert.equal(calls.redis[0].shopify_cart_url, "https://shop.example/cart?view=bridge");
   assert.equal(calls.redis[0].client_reference_id, "cart_abc123");
+  assert.equal(calls.redis[0].tracking_version, "pmp_v4");
   assert.match(calls.redis[0].bridge_started_at, /^\d{4}-\d{2}-\d{2}T/);
 
   assert.deepEqual(res.payload.correlation, {
@@ -207,6 +209,149 @@ test("drops unsafe optional correlation fields and keeps browser-id fallback", a
     shopifyCartUrl: null,
     clientReferenceId: "browser_123",
   });
+});
+
+test("persists first-entry, first-free and last-paid attribution in Stripe and Redis", async (t) => {
+  installEnvironment(t);
+  const calls = mockServices();
+  const res = responseHarness();
+
+  const attribution = {
+    attribution_model: "last_paid_else_first_free_v1",
+    landing_url: "https://shop.example/products/yeast?current=ignored#section",
+    referrer: "https://www.google.com/search?q=ignored",
+    utm_source: "google",
+    utm_medium: "cpc",
+    utm_campaign: "yeast_sales",
+    utm_content: "asset_group_1",
+    utm_term: "dog yeast",
+    gclid: "gclid_valid_123",
+    gbraid: "gbraid_valid_123",
+    wbraid: "wbraid_valid_123",
+    fbclid: "fbclid_valid_123",
+    ttclid: "ttclid_valid_123",
+    msclkid: "0123456789abcdef0123456789abcdef",
+    fbp: "fb.1.1700000000000.123456789012345",
+    fbc: "fb.1.1700000000000.IwAR_valid-click-123",
+    ga_client_id: "123456789.1700000000",
+    ga_session_id: "1700000000",
+    ga_session_number: "2",
+    first_entry_landing_url: "https://shop.example/blogs/news/dog-yeast?ignored=1",
+    first_entry_referrer: "https://www.google.com/",
+    first_entry_source: "google",
+    first_entry_medium: "organic",
+    first_entry_campaign: "seo_yeast",
+    first_entry_at: "2026-08-01T12:00:00.000Z",
+    first_touch_landing_url: "https://shop.example/pages/dog-yeast-solution?ignored=1",
+    first_touch_referrer: "https://l.instagram.com/",
+    first_touch_source: "instagram",
+    first_touch_medium: "dm",
+    first_touch_campaign: "customer_dm",
+    first_touch_at: "2026-08-02T12:00:00.000Z",
+    last_touch_landing_url: "https://shop.example/products/yeast?ignored=1",
+    last_touch_referrer: "https://www.google.com/",
+    last_touch_source: "google",
+    last_touch_medium: "paid_social",
+    last_touch_campaign: "yeast_retargeting",
+    last_touch_at: "2026-08-03T12:00:00.000Z",
+  };
+
+  await handler(checkoutRequest({
+    email: "shopper@example.com",
+    shopify_cart_token: "cart_attribution",
+    shopify_cart_url: "https://shop.example/cart?view=bridge",
+    ...attribution,
+  }), res);
+
+  assert.equal(res.statusCode, 200);
+  const stripe = calls.stripe[0];
+  const redis = calls.redis[0];
+  const expected = {
+    attribution_model: "last_paid_else_first_free_v1",
+    first_entry_landing: "https://shop.example/blogs/news/dog-yeast",
+    first_entry_referrer: "https://www.google.com/",
+    first_entry_source: "google",
+    first_entry_medium: "organic",
+    first_entry_campaign: "seo_yeast",
+    first_entry_at: "2026-08-01T12:00:00.000Z",
+    first_touch_landing: "https://shop.example/pages/dog-yeast-solution",
+    first_touch_referrer: "https://l.instagram.com/",
+    first_touch_source: "instagram",
+    first_touch_medium: "dm",
+    first_touch_campaign: "customer_dm",
+    first_touch_at: "2026-08-02T12:00:00.000Z",
+    last_touch_landing: "https://shop.example/products/yeast",
+    last_touch_referrer: "https://www.google.com/",
+    last_touch_source: "google",
+    last_touch_medium: "paid_social",
+    last_touch_campaign: "yeast_retargeting",
+    last_touch_at: "2026-08-03T12:00:00.000Z",
+  };
+  for (const [key, value] of Object.entries(expected)) {
+    assert.equal(stripe.get(`metadata[${key}]`), value, `Stripe metadata ${key}`);
+    assert.equal(redis[key], value, `Redis ${key}`);
+  }
+
+  for (const [key, value] of Object.entries({
+    gclid: attribution.gclid,
+    gbraid: attribution.gbraid,
+    wbraid: attribution.wbraid,
+    fbclid: attribution.fbclid,
+    ttclid: attribution.ttclid,
+    msclkid: attribution.msclkid,
+    fbp: attribution.fbp,
+    fbc: attribution.fbc,
+  })) {
+    assert.equal(stripe.get(`metadata[${key}]`), value, `Stripe metadata ${key}`);
+    assert.equal(redis[key], value, `Redis ${key}`);
+  }
+
+  const sessionMetadataKeys = [...stripe.keys()].filter((key) => key.startsWith("metadata["));
+  assert.ok(sessionMetadataKeys.length <= 50, `Stripe Session metadata uses ${sessionMetadataKeys.length}/50 keys`);
+});
+
+test("rejects untrusted identifiers and removes email addresses from attribution", async (t) => {
+  installEnvironment(t);
+  const calls = mockServices();
+  const res = responseHarness();
+
+  await handler(checkoutRequest({
+    external_id: "shopper@example.com",
+    fbp: "shopper@example.com",
+    fbc: "fb.1.not-a-time.shopper@example.com",
+    gclid: "shopper@example.com",
+    gbraid: "bad id with spaces",
+    wbraid: "test",
+    fbclid: "shopper@example.com",
+    ttclid: "javascript:alert(1)",
+    msclkid: "not/a/click/id",
+    utm_source: "shopper@example.com",
+    first_entry_landing_url: "https://shop.example/customer/shopper%40example.com/orders?secret=1",
+    first_entry_referrer: "https://email.example/click/shopper%2540example.com?secret=1",
+    first_entry_source: "shopper@example.com",
+    first_touch_landing_url: "https://shop.example/blogs/news/normal-page?email=shopper@example.com",
+    last_touch_campaign: "sent-to-shopper@example.com",
+  }), res);
+
+  assert.equal(res.statusCode, 200);
+  const stripe = calls.stripe[0];
+  const redis = calls.redis[0];
+  for (const key of [
+    "person_id", "browser_id", "fbp", "fbc", "gclid", "gbraid", "wbraid", "fbclid",
+    "ttclid", "msclkid", "utm_source", "first_entry_source", "last_touch_campaign",
+  ]) {
+    assert.equal(stripe.get(`metadata[${key}]`), null, `Stripe omits ${key}`);
+    const redisKey = key === "browser_id" || key === "person_id" ? "external_id" : key;
+    if (redisKey in redis) assert.equal(redis[redisKey], null, `Redis clears ${redisKey}`);
+  }
+  assert.equal(stripe.get("client_reference_id"), null);
+  assert.equal(stripe.get("metadata[first_entry_landing]"), "https://shop.example/");
+  assert.equal(stripe.get("metadata[first_entry_referrer]"), "https://email.example/");
+  assert.equal(redis.first_entry_landing, "https://shop.example/");
+  assert.equal(redis.first_entry_referrer, "https://email.example/");
+  // Query strings are discarded, so an email used only as a query parameter
+  // cannot enter metadata while the non-identifying page remains useful.
+  assert.equal(stripe.get("metadata[first_touch_landing]"), "https://shop.example/blogs/news/normal-page");
 });
 
 test("localizes Stripe Checkout from trusted Shopify locale tags", async (t) => {
