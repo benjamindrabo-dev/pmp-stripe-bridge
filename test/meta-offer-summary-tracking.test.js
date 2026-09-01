@@ -4,6 +4,8 @@ import vm from "node:vm";
 
 import handler from "../api/meta-offer-summary.js";
 
+const DAY = 24 * 60 * 60 * 1000;
+
 function responseHarness() {
   return {
     statusCode: 200,
@@ -62,6 +64,8 @@ function successfulCheckout() {
 
 function storageFrom(map, onAccess = () => {}) {
   return {
+    get length() { return map.size; },
+    key(index) { return Array.from(map.keys())[index] || null; },
     getItem(key) { onAccess("get", key); return map.has(key) ? map.get(key) : null; },
     setItem(key, value) { onAccess("set", key); map.set(key, String(value)); },
     removeItem(key) { onAccess("remove", key); map.delete(key); },
@@ -275,407 +279,158 @@ test("failed Shopify cart additions do not emit add_to_cart", async () => {
   assert.equal(storefront.google.length, 0);
 });
 
-test("keeps literal first entry, earliest free touch and latest paid touch across returns", async () => {
-  const localMap = new Map();
-  const start = Date.UTC(2026, 7, 1, 12, 0, 0);
-
-  storefrontHarness(async () => new FakeResponse({}), {
-    localMap,
-    clock: { now: start },
-    href: "https://puremajestypet.com/products/collagen",
-  });
-  storefrontHarness(async () => new FakeResponse({}), {
-    localMap,
-    clock: { now: start + 1_000 },
-    href: "https://puremajestypet.com/blogs/news/dog-collagen-guide",
-    referrer: "https://www.google.com/search?q=collagen+for+dogs",
-  });
-  storefrontHarness(async () => new FakeResponse({}), {
-    localMap,
-    clock: { now: start + 2_000 },
-    href: "https://puremajestypet.com/products/collagen?utm_source=google&utm_medium=cpc&utm_campaign=collagen_search&gclid=GCLID123456",
-    referrer: "https://www.google.com/",
-  });
-
-  const requests = [];
-  const returning = storefrontHarness(async (_input, init) => {
-    requests.push(JSON.parse(init.body));
-    return new FakeResponse({});
-  }, {
-    localMap,
-    clock: { now: start + 3_000 },
-    href: "https://puremajestypet.com/products/yeast",
-  });
-  await checkoutBody(returning, { items: [] });
-
-  const body = requests[0];
-  assert.equal(body.attribution_model, "last_paid_else_first_free_v1");
-  assert.equal(body.first_entry_landing_url, "https://puremajestypet.com/products/collagen");
-  assert.equal(body.first_entry_source, "direct");
-  assert.equal(body.first_entry_medium, "none");
-  assert.equal(body.first_touch_landing_url, "https://puremajestypet.com/blogs/news/dog-collagen-guide");
-  assert.equal(body.first_touch_source, "google");
-  assert.equal(body.first_touch_medium, "organic");
-  assert.equal(body.last_touch_source, "google");
-  assert.equal(body.last_touch_medium, "cpc");
-  assert.equal(body.last_touch_campaign, "collagen_search");
-  assert.equal(body.gclid, "GCLID123456");
-});
-
-test("checkout in an older tab refreshes the newer paid touch from another tab", async () => {
-  const localMap = new Map();
-  const start = Date.UTC(2026, 7, 2, 12, 0, 0);
-  const requests = [];
-  const googleTab = storefrontHarness(async (_input, init) => {
-    requests.push(JSON.parse(init.body));
-    return new FakeResponse({});
-  }, {
-    localMap,
-    clock: { now: start },
-    href: "https://puremajestypet.com/products/collagen?utm_source=google&utm_medium=cpc&gclid=GOOGLECLICK123",
-  });
-
-  storefrontHarness(async () => new FakeResponse({}), {
-    localMap,
-    clock: { now: start + 5_000 },
-    href: "https://puremajestypet.com/products/yeast?utm_source=meta&utm_medium=paid_social&utm_campaign=yeast_retargeting&fbclid=METACLICK12345",
-    referrer: "https://l.facebook.com/",
-  });
-
-  await checkoutBody(googleTab, { items: [] });
-  const body = requests[0];
-  assert.equal(body.last_touch_source, "meta");
-  assert.equal(body.last_touch_medium, "paid_social");
-  assert.equal(body.last_touch_campaign, "yeast_retargeting");
-  assert.equal(body.fbclid, "METACLICK12345");
-  assert.match(body.fbc, /^fb\.1\.\d+\.METACLICK12345$/);
-  assert.equal("gclid" in body, false);
-});
-
-test("a bare fbclid is retained as free Meta traffic and never becomes last-paid", async () => {
+test("checkout bridge reads canonical pixel attribution without writing legacy keys", async () => {
+  const now = Date.UTC(2026, 8, 1);
+  const localMap = new Map([["pmp:attribution", JSON.stringify({
+    schemaVersion: 3,
+    journeyId: "journey-test-123456",
+    startedAt: now - 1_000,
+    expiresAt: now + (90 * 24 * 60 * 60 * 1000),
+    firstEntry: { landingUrl: "https://puremajestypet.com/en-ca/products/collagen", capturedAt: now - 1_000 },
+    firstFree: {
+      landingUrl: "https://puremajestypet.com/blogs/news/dog-health",
+      referrer: "https://www.google.com/",
+      source: "google",
+      medium: "organic",
+      campaign: "dog_health_guide",
+      capturedAt: now - 2_000,
+    },
+    lastPaid: {
+      clickIds: { gclid: "TEST_FAKE_GCLID_001" },
+      landingUrl: "https://puremajestypet.com/en-ca/products/collagen?gclid=TEST_FAKE_GCLID_001",
+      capturedAt: now - 1_000,
+    },
+    writer: "pmp-custom-pixel",
+  })]]);
+  const writes = [];
   const requests = [];
   const storefront = storefrontHarness(async (_input, init) => {
     requests.push(JSON.parse(init.body));
     return new FakeResponse({});
-  }, {
-    href: "https://puremajestypet.com/products/collagen?fbclid=UNPAIDMETA123",
-    referrer: "https://l.facebook.com/",
-  });
+  }, { localMap, clock: { now }, onLocalAccess: (operation, key) => {
+    if (operation !== "get") writes.push([operation, key]);
+  } });
 
-  await checkoutBody(storefront, { items: [] });
-  const body = requests[0];
-  assert.equal(body.first_touch_source, "facebook");
-  assert.equal(body.first_touch_medium, "organic_social");
-  assert.equal("last_touch_source" in body, false);
-  assert.equal(body.fbclid, "UNPAIDMETA123");
-  assert.match(body.fbc, /^fb\.1\.\d+\.UNPAIDMETA123$/);
+  await checkoutBody(storefront, { items: [], gclid: "STALE_THEME_GCLID_123456" });
+  assert.equal(requests[0].journey_id, "journey-test-123456");
+  assert.equal(requests[0].gclid, "TEST_FAKE_GCLID_001");
+  assert.notEqual(requests[0].gclid, "STALE_THEME_GCLID_123456");
+  assert.equal(requests[0].last_touch_landing_url, "https://puremajestypet.com/en-ca/products/collagen");
+  assert.equal(requests[0].first_touch_source, "google");
+  assert.equal(requests[0].first_touch_medium, "organic");
+  assert.equal(requests[0].first_touch_campaign, "dog_health_guide");
+  assert.deepEqual(writes, []);
 });
 
-test("Meta paid UTM keeps a valid fbc even without a raw fbclid", async () => {
+test("phased rollout reads an active legacy paid click without writing legacy storage", async () => {
+  const now = Date.UTC(2026, 8, 1);
+  const accesses = [];
   const requests = [];
-  const storefront = storefrontHarness(async (_input, init) => {
-    requests.push(JSON.parse(init.body));
-    return new FakeResponse({});
-  }, {
-    href: "https://puremajestypet.com/products/collagen?utm_source=instagram&utm_medium=paid-social&utm_campaign=retargeting",
-  });
-
-  await checkoutBody(storefront, {
-    items: [],
-    fbc: "fb.1.1785600000000.ValidMetaCookie123",
-  });
-  const body = requests[0];
-  assert.equal(body.last_touch_source, "instagram");
-  assert.equal(body.last_touch_medium, "paid_social");
-  assert.equal(body.fbc, "fb.1.1785600000000.ValidMetaCookie123");
-});
-
-test("a non-Meta paid touch clears an unrelated fbc", async () => {
-  const requests = [];
-  const storefront = storefrontHarness(async (_input, init) => {
-    requests.push(JSON.parse(init.body));
-    return new FakeResponse({});
-  }, {
-    href: "https://puremajestypet.com/products/collagen?utm_source=google&utm_medium=paid_search&gclid=GOOGLECLICK456",
-  });
-
-  await checkoutBody(storefront, {
-    items: [],
-    fbc: "fb.1.1785600000000.StaleMetaCookie123",
-  });
-  assert.equal(requests[0].gclid, "GOOGLECLICK456");
-  assert.equal("fbc" in requests[0], false);
-});
-
-test("invalid body identifiers are stripped and cannot invent a paid touch", async () => {
-  const requests = [];
-  const storefront = storefrontHarness(async (_input, init) => {
-    requests.push(JSON.parse(init.body));
-    return new FakeResponse({});
-  });
-
-  await checkoutBody(storefront, {
-    items: [],
-    gclid: "shopper@example.com",
-    fbclid: "bad id with spaces",
-    fbc: "fb.1.not-a-time.bad",
-    fbp: "not-a-browser-cookie",
-  });
-  const body = requests[0];
-  assert.equal("gclid" in body, false);
-  assert.equal("fbclid" in body, false);
-  assert.equal("fbc" in body, false);
-  assert.equal("fbp" in body, false);
-  assert.equal("last_touch_source" in body, false);
-});
-
-test("a valid paid identifier supplied by the theme seeds last-paid only when absent", async () => {
-  const requests = [];
-  const storefront = storefrontHarness(async (_input, init) => {
-    requests.push(JSON.parse(init.body));
-    return new FakeResponse({});
-  });
-
-  await checkoutBody(storefront, {
-    items: [],
-    landing_url: "https://puremajestypet.com/products/collagen",
-    gclid: "THEMEGCLID12345",
-  });
-  const body = requests[0];
-  assert.equal(body.last_touch_source, "google");
-  assert.equal(body.last_touch_medium, "cpc");
-  assert.equal(body.gclid, "THEMEGCLID12345");
-});
-
-test("migrates an unexpired legacy paid record without inventing historical first entry", async () => {
-  const now = Date.UTC(2026, 7, 3, 12, 0, 0);
   const localMap = new Map([["pmp_paid_attribution_v3", JSON.stringify({
-    landing_url: "https://puremajestypet.com/products/yeast?utm_source=google&utm_medium=cpc&gclid=LEGACYGCLID123",
-    referrer: "https://www.google.com/",
-    captured_at: now - 10_000,
+    landing_url: "https://puremajestypet.com/products/collagen?utm_source=google&utm_medium=cpc",
+    // Transitional readers must support legacy Unix seconds as well as ms.
+    captured_at: Math.floor((now - DAY) / 1000),
     utm_source: "google",
     utm_medium: "cpc",
-    utm_campaign: "legacy_paid",
-    gclid: "LEGACYGCLID123",
+    utm_campaign: "legacy_search",
+    gclid: "LEGACY_GCLID_123456",
   })]]);
-  const requests = [];
   const storefront = storefrontHarness(async (_input, init) => {
     requests.push(JSON.parse(init.body));
     return new FakeResponse({});
   }, {
     localMap,
     clock: { now },
-    href: "https://puremajestypet.com/products/collagen",
+    onLocalAccess: (operation, key) => accesses.push([operation, key]),
   });
 
   await checkoutBody(storefront, { items: [] });
-  const body = requests[0];
-  assert.equal(body.first_entry_landing_url, "https://puremajestypet.com/products/collagen");
-  assert.equal(body.first_entry_source, "direct");
-  assert.equal(body.last_touch_campaign, "legacy_paid");
-  assert.equal(body.gclid, "LEGACYGCLID123");
+  assert.equal(requests[0].gclid, "LEGACY_GCLID_123456");
+  assert.equal(requests[0].last_touch_source, "google");
+  assert.equal(requests[0].last_touch_campaign, "legacy_search");
+  assert.equal(accesses.some(([operation]) => operation !== "get"), false);
 });
 
-test("migrates the earliest clearly free legacy touch and ignores a paid generic fallback", async () => {
-  const now = Date.UTC(2026, 7, 4, 12, 0, 0);
+test("a newer legacy click wins a stale active canonical during rollback recovery", async () => {
+  const now = Date.UTC(2026, 8, 1);
+  const requests = [];
   const localMap = new Map([
-    ["pmp_paid_attribution_v3", JSON.stringify({
-      landing_url: "https://puremajestypet.com/blogs/news/yeast-guide",
-      referrer: "https://www.google.com/",
-      captured_at: now - 20_000,
-      utm_source: "google",
-      utm_medium: "organic",
+    ["pmp:attribution", JSON.stringify({
+      schemaVersion: 3,
+      journeyId: "journey-rollback-123456",
+      startedAt: now - 3 * DAY,
+      expiresAt: now + 87 * DAY,
+      firstEntry: {},
+      firstFree: {},
+      lastPaid: {
+        clickIds: { gclid: "STALE_CANONICAL_GCLID_123" },
+        capturedAt: now - 3 * DAY,
+      },
     })],
-    ["pmp_last_touch_v1", JSON.stringify({
-      landing_url: "https://puremajestypet.com/products/yeast",
-      captured_at: now - 10_000,
-      utm_source: "google",
-      utm_medium: "cpc",
-      gclid: "UNTRUSTEDPAID123",
+    ["pmp_paid_attribution_v3", JSON.stringify({
+      msclkid: "NEWER_ROLLBACK_MSCLKID_123",
+      captured_at: now - DAY,
     })],
   ]);
-  const requests = [];
   const storefront = storefrontHarness(async (_input, init) => {
     requests.push(JSON.parse(init.body));
     return new FakeResponse({});
   }, { localMap, clock: { now } });
 
   await checkoutBody(storefront, { items: [] });
-  const body = requests[0];
-  assert.equal(body.first_touch_landing_url, "https://puremajestypet.com/blogs/news/yeast-guide");
-  assert.equal(body.first_touch_source, "google");
-  assert.equal(body.first_touch_medium, "organic");
-  assert.equal("last_touch_source" in body, false);
-  assert.equal("gclid" in body, false);
+  assert.equal(requests[0].journey_id, "journey-rollback-123456");
+  assert.equal(requests[0].msclkid, "NEWER_ROLLBACK_MSCLKID_123");
+  assert.equal("gclid" in requests[0], false);
 });
 
-test("does not replay the polluted legacy session landing as a new paid touch", async () => {
-  const sessionMap = new Map([["pmp_landing_url",
-    "https://puremajestypet.com/products/yeast?utm_source=google&utm_medium=cpc&gclid=STALEGCLID123",
-  ]]);
+test("current paid URL survives the first-page race before the async pixel write", async () => {
   const requests = [];
   const storefront = storefrontHarness(async (_input, init) => {
     requests.push(JSON.parse(init.body));
     return new FakeResponse({});
   }, {
-    sessionMap,
-    href: "https://puremajestypet.com/products/collagen",
+    href: "https://puremajestypet.com/en-ca/?msclkid=FIRST_PAGE_MSCLKID_123456",
   });
-
   await checkoutBody(storefront, { items: [] });
-  assert.equal(requests[0].first_entry_source, "direct");
-  assert.equal("last_touch_source" in requests[0], false);
-  assert.equal("gclid" in requests[0], false);
+  assert.equal(requests[0].msclkid, "FIRST_PAGE_MSCLKID_123456");
+  assert.equal(requests[0].last_touch_source, "microsoft");
+  assert.equal(requests[0].last_touch_medium, "cpc");
 });
 
-test("an expired own-session landing cannot replay its paid touch", async () => {
-  const now = Date.UTC(2026, 7, 5, 12, 0, 0);
-  const old = now - (31 * 60 * 1000);
-  const sessionMap = new Map([["pmp:attribution:session-landing:v1", JSON.stringify({
-    capturedAt: old,
-    fingerprint: "old-paid-touch",
-    touch: {
-      landing_url: "https://puremajestypet.com/products/yeast?utm_source=google&utm_medium=cpc&gclid=OLDSESSION123",
-      referrer: "https://www.google.com/",
-      source: "google",
-      medium: "cpc",
-      campaign: "old_session",
-      gclid: "OLDSESSION123",
-      at: new Date(old).toISOString(),
+test("an older paid URL cannot overwrite a newer click from another tab", async () => {
+  const checkoutNow = Date.UTC(2026, 8, 3);
+  const clock = { now: checkoutNow - 2 * DAY };
+  const requests = [];
+  const localMap = new Map([["pmp:attribution:paid:new-tab-event-123456", JSON.stringify({
+    schemaVersion: 1,
+    journeyId: "journey-newer-tab-123456",
+    startedAt: checkoutNow - DAY,
+    firstEntry: {},
+    firstFree: {},
+    lastPaid: {
+      eventId: "new-tab-event-123456",
+      clickIds: { msclkid: "NEWER_TAB_MSCLKID_123456" },
+      capturedAt: checkoutNow - DAY,
     },
   })]]);
-  const requests = [];
-  const storefront = storefrontHarness(async (_input, init) => {
-    requests.push(JSON.parse(init.body));
-    return new FakeResponse({});
-  }, {
-    sessionMap,
-    clock: { now },
-    href: "https://puremajestypet.com/products/collagen",
-  });
-
-  await checkoutBody(storefront, { items: [] });
-  assert.equal(requests[0].first_entry_source, "direct");
-  assert.equal("last_touch_source" in requests[0], false);
-  assert.equal("gclid" in requests[0], false);
-});
-
-test("denied Shopify consent prevents attribution storage access and removes identifiers", async () => {
-  let allowed = false;
-  const accesses = [];
-  const sessionAccesses = [];
-  const requests = [];
-  const storefront = storefrontHarness(async (_input, init) => {
-    requests.push(JSON.parse(init.body));
-    return new FakeResponse({});
-  }, {
-    href: "https://puremajestypet.com/products/collagen",
-    customerPrivacy: { userCanBeTracked: () => allowed },
-    onLocalAccess: (operation, key) => accesses.push([operation, key]),
-    onSessionAccess: (operation, key) => sessionAccesses.push([operation, key]),
-  });
-
-  assert.deepEqual(accesses, []);
-  assert.deepEqual(sessionAccesses, []);
-  await checkoutBody(storefront, {
-    items: [],
-    attribution_model: "forged",
-    landing_url: "https://example.com/private",
-    utm_source: "google",
-    gclid: "CONSENTGCLID123",
-    fbp: "fb.1.1785600000000.ValidBrowser123",
-    fbc: "fb.1.1785600000000.ValidClickCookie123",
-    external_id: "browser_123",
-    ga_client_id: "123.456",
-    first_touch_source: "google",
-    last_paid_source: "google",
-  });
-
-  const body = requests[0];
-  assert.deepEqual(accesses, []);
-  assert.deepEqual(sessionAccesses, []);
-  for (const key of [
-    "attribution_model", "landing_url", "utm_source", "gclid", "fbp", "fbc",
-    "external_id", "ga_client_id", "first_touch_source", "last_paid_source",
-  ]) assert.equal(key in body, false, key);
-  assert.deepEqual(body.items, []);
-});
-
-test("consent granted after page load captures the current visit at checkout", async () => {
-  let allowed = false;
-  const requests = [];
-  const storefront = storefrontHarness(async (_input, init) => {
-    requests.push(JSON.parse(init.body));
-    return new FakeResponse({});
-  }, {
-    href: "https://puremajestypet.com/products/collagen",
-    customerPrivacy: { userCanBeTracked: () => allowed },
-  });
-
-  allowed = true;
-  storefront.location.href = "https://puremajestypet.com/products/yeast?utm_source=instagram&utm_medium=dm&utm_campaign=dm_marie";
-  await checkoutBody(storefront, { items: [] });
-  const body = requests[0];
-  assert.equal(body.first_entry_landing_url,
-    "https://puremajestypet.com/products/yeast");
-  assert.equal(body.first_touch_source, "instagram");
-  assert.equal(body.first_touch_medium, "dm");
-  assert.equal(body.first_touch_campaign, "dm_marie");
-  assert.equal("last_touch_source" in body, false);
-});
-
-test("email-like PII is absent from persisted state and the checkout attribution body", async () => {
-  const localMap = new Map();
-  const sessionMap = new Map();
-  const requests = [];
   const storefront = storefrontHarness(async (_input, init) => {
     requests.push(JSON.parse(init.body));
     return new FakeResponse({});
   }, {
     localMap,
-    sessionMap,
-    href: "https://puremajestypet.com/customers/shopper%40example.com?utm_source=google&utm_medium=cpc&utm_campaign=lead%2540example.com&gclid=SAFEGCLID12345",
-    referrer: "https://referrer.example/path/buyer%40example.com?email=buyer%40example.com",
+    clock,
+    href: "https://puremajestypet.com/?gclid=OLDER_OPEN_TAB_GCLID_123456",
   });
+  clock.now = checkoutNow;
 
-  await checkoutBody(storefront, {
-    items: [],
-    landing_url: "https://puremajestypet.com/products/yeast?email=customer%40example.com",
-    referrer: "https://partner.example/customer%40example.com?email=customer%40example.com",
-    utm_source: "google",
-    utm_medium: "cpc",
-    utm_campaign: "customer@example.com",
-    utm_content: "customer%2540example.com",
-    utm_term: "safe keyword",
-    external_id: "customer@example.com",
-    ga_client_id: "customer%40example.com",
-    gclid: "SAFEGCLID12345",
-  });
-
-  const storedText = [...localMap.values(), ...sessionMap.values()].join("\n");
-  const body = requests[0];
-  assert.equal(storedText.includes("shopper"), false);
-  assert.equal(storedText.includes("buyer"), false);
-  assert.equal(storedText.includes("%40"), false);
-  assert.equal(storedText.includes("@"), false);
-  assert.equal(body.first_entry_landing_url, "https://puremajestypet.com/");
-  assert.equal(body.last_touch_source, "google");
-  assert.equal(body.last_touch_medium, "cpc");
-  assert.equal(body.last_touch_campaign, "");
-  assert.equal(body.gclid, "SAFEGCLID12345");
-  assert.equal(body.utm_source, "google");
-  assert.equal(body.utm_medium, "cpc");
-  assert.equal(body.utm_term, "safe keyword");
-  assert.equal("utm_campaign" in body, false);
-  assert.equal("utm_content" in body, false);
-  assert.equal("external_id" in body, false);
-  assert.equal("ga_client_id" in body, false);
-  assert.equal(JSON.stringify(body).includes("%40"), false);
-  assert.equal(JSON.stringify(body).includes("@"), false);
+  await checkoutBody(storefront, { items: [] });
+  assert.equal(requests[0].journey_id, "journey-newer-tab-123456");
+  assert.equal(requests[0].msclkid, "NEWER_TAB_MSCLKID_123456");
+  assert.equal("gclid" in requests[0], false);
 });
 
-test("expired attribution is rejected from both storage and the in-memory cache", async () => {
-  const start = Date.UTC(2026, 7, 6, 12, 0, 0);
+test("a paid URL left open beyond 90 days cannot resurrect its click id", async () => {
+  const start = Date.UTC(2026, 4, 1);
   const clock = { now: start };
   const requests = [];
   const storefront = storefrontHarness(async (_input, init) => {
@@ -683,19 +438,270 @@ test("expired attribution is rejected from both storage and the in-memory cache"
     return new FakeResponse({});
   }, {
     clock,
-    href: "https://puremajestypet.com/products/collagen?utm_source=google&utm_medium=cpc&gclid=EXPIRINGGCLID123",
+    href: "https://puremajestypet.com/?gclid=OPEN_TAB_EXPIRED_GCLID_123456",
+  });
+  clock.now = start + 91 * DAY;
+
+  await checkoutBody(storefront, { items: [] });
+  assert.equal("gclid" in requests[0], false);
+  assert.equal("last_touch_source" in requests[0], false);
+});
+
+test("an immutable paid journal repairs a concurrently stale canonical at checkout", async () => {
+  const now = Date.UTC(2026, 8, 1);
+  const requests = [];
+  const localMap = new Map();
+  localMap.set("pmp:attribution", JSON.stringify({
+      schemaVersion: 3,
+      journeyId: "journey-stale-tab-123456",
+      startedAt: now - 2_000,
+      expiresAt: now + 90 * DAY,
+      firstEntry: {},
+      firstFree: {},
+      lastPaid: {
+        clickIds: { gclid: "CONCURRENT_OLD_GCLID_123" },
+        capturedAt: now - 2_000,
+      },
+    }));
+  // The journal must not disappear behind an arbitrary localStorage key cap.
+  for (let i = 0; i < 2_005; i += 1) localMap.set(`unrelated-${i}`, "x");
+  localMap.set("pmp:attribution:paid:event-newer-123456", JSON.stringify({
+      schemaVersion: 1,
+      journeyId: "journey-new-tab-123456",
+      startedAt: now - 1_000,
+      firstEntry: { landingUrl: "https://puremajestypet.com/en-ca/", capturedAt: now - 1_000 },
+      firstFree: {},
+      lastPaid: {
+        clickIds: { msclkid: "CONCURRENT_NEW_MSCLKID_123" },
+        capturedAt: now - 1_000,
+      },
+    }));
+  const storefront = storefrontHarness(async (_input, init) => {
+    requests.push(JSON.parse(init.body));
+    return new FakeResponse({});
+  }, { localMap, clock: { now } });
+
+  await checkoutBody(storefront, { items: [] });
+  assert.equal(requests[0].journey_id, "journey-new-tab-123456");
+  assert.equal(requests[0].msclkid, "CONCURRENT_NEW_MSCLKID_123");
+  assert.equal("gclid" in requests[0], false);
+});
+
+test("journal tie-breaking preserves canonical first-free context in the same journey", async () => {
+  const now = Date.UTC(2026, 8, 1);
+  const capturedAt = now - 1_000;
+  const journeyId = "journey-shared-context-123456";
+  const requests = [];
+  const localMap = new Map([
+    ["pmp:attribution", JSON.stringify({
+      schemaVersion: 3,
+      journeyId,
+      startedAt: now - DAY,
+      expiresAt: now + 90 * DAY,
+      firstEntry: {},
+      firstFree: {
+        landingUrl: "https://puremajestypet.com/blogs/news/dog-health",
+        source: "google",
+        medium: "organic",
+        capturedAt: now - DAY,
+      },
+      lastPaid: {
+        eventId: "event-aaaaaa-123456",
+        clickIds: { gclid: "TIED_OLD_GCLID_123456" },
+        capturedAt,
+      },
+    })],
+    ["pmp:attribution:paid:event-zzzzzz-123456", JSON.stringify({
+      schemaVersion: 1,
+      journeyId,
+      startedAt: now - DAY,
+      firstEntry: {},
+      firstFree: {},
+      lastPaid: {
+        eventId: "event-zzzzzz-123456",
+        clickIds: { msclkid: "TIED_NEW_MSCLKID_123456" },
+        capturedAt,
+      },
+    })],
+  ]);
+  const storefront = storefrontHarness(async (_input, init) => {
+    requests.push(JSON.parse(init.body));
+    return new FakeResponse({});
+  }, { localMap, clock: { now } });
+
+  await checkoutBody(storefront, { items: [] });
+  assert.equal(requests[0].journey_id, journeyId);
+  assert.equal(requests[0].msclkid, "TIED_NEW_MSCLKID_123456");
+  assert.equal("gclid" in requests[0], false);
+  assert.equal(requests[0].first_touch_source, "google");
+  assert.equal(requests[0].first_touch_medium, "organic");
+});
+
+test("a chain of pending journals uses the preceding resolved journey without losing its latest click", async () => {
+  const now = Date.UTC(2026, 8, 1);
+  const requests = [];
+  const localMap = new Map([
+    ["pmp:attribution:paid:event-prior-123456", JSON.stringify({
+      schemaVersion: 1,
+      contextPending: false,
+      journeyId: "journey-prior-context-123456",
+      startedAt: now - 2_000,
+      firstEntry: {},
+      firstFree: {
+        landingUrl: "https://puremajestypet.com/blogs/news/guide",
+        source: "google",
+        medium: "organic",
+        capturedAt: now - 2_000,
+      },
+      lastPaid: {
+        eventId: "event-prior-123456",
+        clickIds: { gclid: "PRIOR_GCLID_123456" },
+        capturedAt: now - 2_000,
+      },
+    })],
+    ["pmp:attribution:paid:event-pending-123456", JSON.stringify({
+      schemaVersion: 1,
+      contextPending: true,
+      journeyId: "stale-preliminary-journey-123456",
+      startedAt: now - 3_000,
+      firstEntry: {},
+      firstFree: {},
+      lastPaid: {
+        eventId: "event-pending-123456",
+        clickIds: { msclkid: "PENDING_NEW_MSCLKID_123456" },
+        capturedAt: now - 1_000,
+      },
+    })],
+    ["pmp:attribution:paid:event-latest-pending-123456", JSON.stringify({
+      schemaVersion: 1,
+      contextPending: true,
+      journeyId: "another-stale-journey-123456",
+      startedAt: now - 3_000,
+      firstEntry: {},
+      firstFree: {},
+      lastPaid: {
+        eventId: "event-latest-pending-123456",
+        clickIds: { sccid: "PENDING_LATEST_SCCID_123456" },
+        capturedAt: now - 500,
+      },
+    })],
+  ]);
+  const storefront = storefrontHarness(async (_input, init) => {
+    requests.push(JSON.parse(init.body));
+    return new FakeResponse({});
+  }, { localMap, clock: { now } });
+
+  await checkoutBody(storefront, { items: [] });
+  assert.equal(requests[0].journey_id, "journey-prior-context-123456");
+  assert.equal(requests[0].sccid, "PENDING_LATEST_SCCID_123456");
+  assert.equal("msclkid" in requests[0], false);
+  assert.equal("gclid" in requests[0], false);
+  assert.equal(requests[0].first_touch_source, "google");
+});
+
+test("canonical paid UTM without a click id remains an active last-paid touch", async () => {
+  const now = Date.UTC(2026, 8, 1);
+  const requests = [];
+  const localMap = new Map([["pmp:attribution", JSON.stringify({
+    schemaVersion: 3,
+    journeyId: "journey-utm-paid-123456",
+    startedAt: now - DAY,
+    expiresAt: now + 89 * DAY,
+    firstEntry: {},
+    firstFree: {},
+    lastPaid: {
+      clickIds: {},
+      landingUrl: "https://puremajestypet.com/products/collagen?utm_source=instagram&utm_medium=paid-social",
+      source: "instagram",
+      medium: "paid-social",
+      campaign: "retargeting",
+      capturedAt: now - DAY,
+    },
+  })]]);
+  const storefront = storefrontHarness(async (_input, init) => {
+    requests.push(JSON.parse(init.body));
+    return new FakeResponse({});
+  }, { localMap, clock: { now } });
+  await checkoutBody(storefront, { items: [] });
+  assert.equal(requests[0].journey_id, "journey-utm-paid-123456");
+  assert.equal(requests[0].last_touch_source, "instagram");
+  assert.equal(requests[0].last_touch_medium, "paid_social");
+  assert.equal(requests[0].last_touch_campaign, "retargeting");
+});
+
+test("checkout bridge rejects expired canonical attribution and a forged journey id", async () => {
+  const now = Date.UTC(2026, 8, 1);
+  const localMap = new Map([["pmp:attribution", JSON.stringify({
+    schemaVersion: 3, journeyId: "journey-expired-123456", startedAt: now - 1000,
+    expiresAt: now - 1, firstEntry: {}, firstFree: {},
+    lastPaid: { clickIds: { gclid: "TEST_FAKE_EXPIRED_001" }, capturedAt: now - 1000 },
+    writer: "pmp-custom-pixel",
+  })]]);
+  const requests = [];
+  const storefront = storefrontHarness(async (_input, init) => {
+    requests.push(JSON.parse(init.body)); return new FakeResponse({});
+  }, { localMap, clock: { now } });
+  await checkoutBody(storefront, { items: [], journey_id: "forged-journey-123456" });
+  assert.equal("gclid" in requests[0], false);
+  assert.equal("journey_id" in requests[0], false);
+});
+
+test("denied Shopify consent avoids storage and removes every attribution identifier", async () => {
+  const now = Date.UTC(2026, 8, 1);
+  const accesses = [];
+  const requests = [];
+  const localMap = new Map([["pmp:attribution", JSON.stringify({
+    schemaVersion: 3,
+    journeyId: "journey-private-123456",
+    startedAt: now - 1_000,
+    expiresAt: now + DAY,
+    firstEntry: {},
+    firstFree: {},
+    lastPaid: { clickIds: { gclid: "PRIVATE_GCLID_123456" }, capturedAt: now - 1_000 },
+  })]]);
+  const storefront = storefrontHarness(async (_input, init) => {
+    requests.push(JSON.parse(init.body));
+    return new FakeResponse({});
+  }, {
+    localMap,
+    clock: { now },
+    customerPrivacy: { userCanBeTracked: () => false },
+    onLocalAccess: (operation, key) => accesses.push([operation, key]),
   });
 
-  clock.now += 91 * 24 * 60 * 60 * 1000;
-  storefront.location.href = "https://puremajestypet.com/products/yeast";
-  storefront.document.referrer = "";
-  await checkoutBody(storefront, { items: [] });
+  await checkoutBody(storefront, {
+    items: [],
+    journey_id: "forged-journey-123456",
+    attribution_model: "forged",
+    landing_url: "https://example.com/private",
+    utm_source: "google",
+    gclid: "BODY_GCLID_123456",
+    fbp: "fb.1.1785600000000.ValidBrowser123",
+    fbc: "fb.1.1785600000000.ValidClickCookie123",
+    external_id: "browser_123456",
+    ga_client_id: "123.456",
+    first_touch_source: "google",
+    last_paid_source: "google",
+  });
 
-  const body = requests[0];
-  assert.equal(body.first_entry_landing_url, "https://puremajestypet.com/products/yeast");
-  assert.equal(body.first_entry_source, "direct");
-  assert.equal("last_touch_source" in body, false);
-  assert.equal("gclid" in body, false);
+  assert.deepEqual(accesses, []);
+  for (const key of [
+    "journey_id", "attribution_model", "landing_url", "utm_source", "gclid",
+    "fbp", "fbc", "external_id", "ga_client_id", "first_touch_source", "last_paid_source",
+  ]) assert.equal(key in requests[0], false, key);
+});
+
+test("without dated browser state the bridge discards body-supplied journey and click ids", async () => {
+  const requests = [];
+  const storefront = storefrontHarness(async (_input, init) => {
+    requests.push(JSON.parse(init.body));
+    return new FakeResponse({});
+  });
+  await checkoutBody(storefront, {
+    items: [], journey_id: "forged-journey-123456", gclid: "UNDATED_BODY_GCLID_123456",
+  });
+  assert.equal("journey_id" in requests[0], false);
+  assert.equal("gclid" in requests[0], false);
 });
 
 test("loading the ScriptTag twice does not double-wrap fetch or checkout analytics", async () => {
