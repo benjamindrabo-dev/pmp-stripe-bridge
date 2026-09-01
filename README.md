@@ -15,7 +15,7 @@ Shopify order (paid, inventory decremented) <── /api/stripe-webhook <── 
 - `api/create-checkout.js` — creates the Stripe Checkout Session.
 - `api/stripe-webhook.js` — on paid session, creates the Shopify order.
 - `api/recover-checkout.js` — rebuilds an abandoned cart across devices from an opaque Stripe Session ID.
-- `api/meta-offer-summary.js` — live Shopify ScriptTag that enriches checkout requests and tracks their successful/failed bridge responses.
+- `api/meta-offer-summary.js` — Vercel-served storefront helper, currently loaded by a Shopify theme section, that captures transition attribution, enriches checkout requests, and tracks bridge responses.
 - `lib/omnisend.js` — emits the standard Omnisend `started checkout` event when its API key is configured.
 - `public/pmp-checkout-events.js` — sends an idempotent browser-side GA4/Clarity `begin_checkout` after Embedded Checkout mounts and reports Clarity `checkout_error` events.
 - `shopify-snippet-pay-with-stripe.liquid` — the storefront button.
@@ -37,8 +37,9 @@ Shopify order (paid, inventory decremented) <── /api/stripe-webhook <── 
 ## Browser funnel events
 
 `/api/create-checkout` returns the validated charge currency, checkout value,
-line items, and a deterministic event ID in `analytics.beginCheckout`. The live
-ScriptTag emits GA4 `begin_checkout` to `G-KKS5T7SPHR` after a successful
+line items, and a deterministic event ID in `analytics.beginCheckout`. The
+theme-loaded storefront helper emits GA4 `begin_checkout` to `G-KKS5T7SPHR`
+after a successful
 Checkout Session response. This means that Stripe accepted and created the
 checkout; it does not mean that payment has succeeded. The standalone example
 waits until Stripe Embedded Checkout mounts. Both use the same event/session keys, so a memory +
@@ -46,7 +47,7 @@ waits until Stripe Embedded Checkout mounts. Both use the same event/session key
 twice across callbacks, integrations, or page reloads. The same successful
 transition emits a Clarity `begin_checkout`; endpoint or mount failures emit
 Clarity `checkout_error` with low-cardinality stage/code tags and no error
-message or customer data. The live ScriptTag also drops the theme's legacy
+message or customer data. The storefront helper also drops the theme's legacy
 `begin_checkout` call only when it has neither `event_id` nor `items`; complete
 bridge events and every other Google tag call pass through unchanged.
 
@@ -105,39 +106,50 @@ connected pixel. See Shopify's
 [standard events](https://shopify.dev/docs/api/web-pixels-api/standard-events).
 
 This shop uses **external Stripe Embedded Checkout**, not native Shopify
-checkout. Therefore no cart-attribute theme bridge is needed: the existing
-ScriptTag reads attribution immediately before `/api/create-checkout` and never
-writes it. During the phased rollout, if the canonical pixel record is not ready
-yet, it can still read an active legacy paid record or the current paid URL
-without renewing that storage. The request carries `journey_id`, the active
+checkout. Therefore no cart-attribute theme bridge is needed. Until the Custom
+Pixel can be connected, `api/meta-offer-summary.js` is a transitional schema-v3
+writer identified by `writer: "pmp-storefront-fallback-v3"`. It runs on page
+load, migrates the two legacy keys without deleting them, and applies the same
+last-paid-click 90-day rule. Direct, email, organic, referral and Markets-path
+visits do not replace or renew `lastPaid`. It also reads the canonical state
+immediately before `/api/create-checkout`. The request carries `journey_id`, the active
 click IDs, and capture time into Stripe Session metadata and Redis. The Stripe
 webhook then creates the Shopify order
 and writes `pmp_journey_id` plus platform click identifiers into its note
 attributes. This provides a deterministic pixel → Stripe Session → Shopify
 order join without a third-party app once the canonical pixel state exists.
-During the very first asynchronous race before either the canonical state or its
-immutable journal entry exists, the read-only URL/legacy fallback still preserves
-the paid click ID, but it cannot invent a pixel `journey_id`. Existing
-session/event guards prevent duplicate checkout analytics.
+The helper writes the immutable paid journal before the canonical record, scans
+the complete browser keyspace, resolves equal timestamps by event ID, and merges
+same-journey `firstEntry`/`firstFree` context. Existing session/event guards
+prevent duplicate checkout analytics.
+
+This fallback is **not theme-independent**: live-store inspection found its
+`<script>` loader inside a Shopify theme section. The JavaScript file survives a
+Vercel deployment, but a newly published theme must still include that section.
+The connected Custom Pixel remains the no-app durable solution because Customer
+Events configuration belongs to the shop rather than to a theme.
 
 ### Deployment and rollback
 
 1. Deploy this bridge revision and confirm the production deployment is Ready.
-   Keep the existing theme attribution enabled during this step. The bridge's
-   read-only legacy fallback prevents an attribution gap before step 2.
+   Keep the existing theme section enabled during this step. Its transitional
+   writer prevents an attribution gap before step 2.
 2. Paste the pixel source with the exact name **PMP Paid Attribution**, save,
    connect, and verify the fake-ID scenarios in Shopify Pixel Helper/browser
    storage. Then confirm a Stripe **test-mode** Session and test Shopify order
    share `journey_id`/`pmp_journey_id`. Do not place a paid order.
 3. Neutralize the attribution section of `pmp-uniform-hotfix.js` in the source
-   theme (retain its unrelated functions). The live ScriptTag in this repository
-   is already neutralized, so future themes cannot make it a competing writer.
-4. Roll back by disconnecting **PMP Paid Attribution** and redeploying the prior
-   bridge commit. Do not delete `pmp:attribution` or either legacy key; reconnecting
-   the pixel imports every still-valid legacy record that changed while it was off.
+   theme (retain its unrelated functions). After the Custom Pixel is verified,
+   remove the transitional writer from this helper in a separate bridge revision;
+   its checkout enrichment must remain.
+4. Roll back the Custom Pixel phase by disconnecting **PMP Paid Attribution**
+   while leaving this fallback deployed. Do not delete `pmp:attribution` or
+   either legacy key; reconnecting the pixel imports every still-valid legacy
+   record that changed while it was off.
 
 Remaining limits are browser/device continuity, storage clearing/private mode,
-consent restrictions, and the manual Shopify Admin installation step. Repository
+Shopify privacy enforcement, the theme-section dependency of the temporary
+fallback, and the manual Shopify Admin installation step. Repository
 code cannot inspect the shop's configured app pixels/app embeds or connect a
 Custom Pixel without authenticated Admin access; audit those panels and browser
 storage/network listeners separately before retiring an unknown writer.

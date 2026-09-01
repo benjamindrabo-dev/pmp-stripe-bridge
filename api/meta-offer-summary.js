@@ -1,7 +1,8 @@
 // GET /api/meta-offer-summary.js
-// Storefront helper injected by Shopify ScriptTag.
-// It sends the selected market country to the checkout bridge and keeps the
-// existing Meta retargeting discount summary in sync.
+// Storefront helper served from Vercel and currently loaded by a Shopify theme
+// section. It sends the selected market country to the checkout bridge, keeps
+// the Meta retargeting discount summary in sync, and temporarily captures paid
+// attribution until the durable Shopify Custom Pixel can be connected.
 
 const JS = String.raw`(function(){
   'use strict';
@@ -15,12 +16,16 @@ const JS = String.raw`(function(){
     var ga4Destination = 'G-KKS5T7SPHR';
     var gtagGuardAttempts = 0;
     var maxGtagGuardAttempts = 120;
-    // Attribution capture belongs to the native Shopify Custom Pixel. This
-    // ScriptTag is only the thin checkout bridge and never writes attribution.
+    // This writer is a transition fallback. The Shopify Custom Pixel remains
+    // the durable owner because this file's loader currently lives in a theme.
     var canonicalAttributionKey = 'pmp:attribution';
     var paidJournalPrefix = 'pmp:attribution:paid:';
+    var legacyAttributionKeys = ['pmp_paid_attribution_v3', 'pmp:attribution:v1'];
+    var clickIdKeys = ['gclid', 'gbraid', 'wbraid', 'dclid', 'fbclid', 'msclkid', 'ttclid', 'sccid'];
     var attributionModel = 'last_paid_else_first_free_v1';
     var attributionTtlMs = 90 * 24 * 60 * 60 * 1000;
+    var maxPaidJournalEntries = 64;
+    var minimumAttributionDate = Date.UTC(2020, 0, 1);
     var pageObservedAt = Date.now();
 
     function trackingAllowed(){
@@ -56,6 +61,22 @@ const JS = String.raw`(function(){
       return containsEmailLike(clean) ? '' : clean;
     }
 
+    function safeAttributionPath(pathname){
+      var raw = plainAttributionText(pathname || '/', 1500) || '/';
+      var decoded = decodedAttributionText(raw);
+      if (containsEmailLike(decoded)) return '/';
+      var segments = decoded.split('/').filter(Boolean);
+      var offset = segments[0] && /^[a-z]{2}(?:-[a-z]{2})?$/i.test(segments[0]) ? 1 : 0;
+      var prefix = offset ? '/' + segments[0].toLowerCase() + '/' : '/';
+      if (segments.length === offset) return prefix;
+      var root = segments[offset].toLowerCase();
+      if (['products', 'collections', 'pages', 'blogs', 'search'].indexOf(root) !== -1) return raw;
+      if (root === 'cart') return prefix + 'cart';
+      // Account, checkout, order-status and app routes can contain opaque
+      // customer or pre-authentication tokens. Attribution never needs them.
+      return prefix;
+    }
+
     function attributionUrl(value){
       var clean = plainAttributionText(value, 1500);
       if (!clean) return '';
@@ -64,7 +85,7 @@ const JS = String.raw`(function(){
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return '';
         parsed.username = '';
         parsed.password = '';
-        if (containsEmailLike(parsed.pathname)) parsed.pathname = '/';
+        parsed.pathname = safeAttributionPath(parsed.pathname);
         // Query values frequently contain click IDs, search terms and sometimes
         // PII. Dedicated sanitized fields retain attribution; stored page URLs
         // only need the origin and path.
@@ -182,8 +203,14 @@ const JS = String.raw`(function(){
       }
 
       var occurredAt = touchTime(values && (values.at || values.captured_at), now);
+      // Corrupt legacy numbers can be finite yet outside JavaScript Date's
+      // supported range. Never let one malformed record abort all capture.
+      if (!Number.isFinite(new Date(occurredAt).getTime())) {
+        occurredAt = Number.isFinite(new Date(now).getTime()) ? now : Date.now();
+      }
       var paid = Boolean(gclid || gbraid || wbraid || dclid || fbclid || msclkid || ttclid || sccid || isPaidMedium(medium));
-      var identifiableFree = !paid && !(source === 'direct' && (medium === 'none' || !medium));
+      var identifiableFree = !paid && Boolean(referrer || campaign ||
+        (source && source !== 'direct') || (medium && medium !== 'none'));
       return {
         landing_url: landing,
         referrer: referrer,
@@ -431,6 +458,416 @@ const JS = String.raw`(function(){
       });
     }
 
+    /* ---------- Transitional canonical attribution writer ---------- */
+    function plausibleAttributionDate(value, now){
+      var parsed = touchTime(value, 0);
+      return parsed >= minimumAttributionDate && parsed <= now + 5 * 60 * 1000 ? parsed : 0;
+    }
+
+    function firstPlausibleAttributionDate(values, now){
+      for (var i = 0; i < values.length; i++) {
+        var parsed = plausibleAttributionDate(values[i], now);
+        if (parsed) return parsed;
+      }
+      return 0;
+    }
+
+    function storageRecord(key){
+      try {
+        var parsed = JSON.parse(localStorage.getItem(key) || 'null');
+        return parsed && typeof parsed === 'object' ? parsed : null;
+      } catch (_) { return null; }
+    }
+
+    function generatedJourneyId(){
+      try {
+        if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+          return window.crypto.randomUUID();
+        }
+      } catch (_) {}
+      return 'pmp-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 14);
+    }
+
+    function emptyAttributionState(now){
+      return {
+        schemaVersion: 3,
+        journeyId: generatedJourneyId(),
+        startedAt: now,
+        migrationCompletedAt: 0,
+        legacyVersions: {},
+        expiresAt: 0,
+        firstEntry: {},
+        firstFree: {},
+        lastPaid: {},
+        writer: 'pmp-storefront-fallback-v3'
+      };
+    }
+
+    function storedEntry(value, now){
+      if (!value || typeof value !== 'object') return {};
+      var touch = storedTouch(value, null, now);
+      var capturedAt = firstPlausibleAttributionDate([
+        value.capturedAt, value.captured_at, value.at
+      ], now);
+      var entry = {
+        landingUrl: touch && touch.landing_url || '',
+        referrer: touch && touch.referrer || '',
+        source: touch && touch.source || '',
+        medium: touch && touch.medium || '',
+        campaign: touch && touch.campaign || '',
+        content: touch && touch.content || '',
+        term: touch && touch.term || '',
+        capturedAt: capturedAt
+      };
+      if (!entry.landingUrl && !entry.referrer && !entry.source && !entry.medium &&
+        !entry.campaign && !entry.content && !entry.term && !entry.capturedAt) return {};
+      return entry;
+    }
+
+    function entryFromTouch(touch){
+      if (!touch) return {};
+      return {
+        landingUrl: touch.landing_url || '',
+        referrer: touch.referrer || '',
+        source: touch.source || '',
+        medium: touch.medium || '',
+        campaign: touch.campaign || '',
+        content: touch.content || '',
+        term: touch.term || '',
+        capturedAt: touch._time || 0
+      };
+    }
+
+    function clickIdsFromTouch(touch){
+      var ids = {};
+      clickIdKeys.forEach(function(key){
+        var clean = touch && safeClickId(touch[key]);
+        if (clean) ids[key] = clean;
+      });
+      return ids;
+    }
+
+    function hasStoredPaid(value){
+      if (!value || typeof value !== 'object') return false;
+      var ids = value.clickIds && typeof value.clickIds === 'object' ? value.clickIds : value;
+      var hasClick = clickIdKeys.some(function(key){ return Boolean(safeClickId(ids[key])); });
+      return hasClick || isPaidMedium(value.medium || value.utm_medium);
+    }
+
+    function paidRecord(value, parent, now, migrated){
+      if (!value || typeof value !== 'object') return null;
+      var paid = value.lastPaid && typeof value.lastPaid === 'object' ? value.lastPaid : value;
+      var touch = storedTouch(paid, parent || value, now);
+      if (!touch || !touch._paid) return null;
+      var capturedAt = firstPlausibleAttributionDate([
+        paid.capturedAt, paid.captured_at, paid.at,
+        parent && parent.capturedAt, parent && parent.captured_at, parent && parent.at,
+        value.capturedAt, value.captured_at, value.at
+      ], now);
+      var record = Object.assign(entryFromTouch(touch), {
+        clickIds: clickIdsFromTouch(touch),
+        capturedAt: capturedAt,
+        dateUncertain: capturedAt === 0,
+        eventId: safeClickId(paid.eventId)
+      });
+      if (migrated || paid.migrated === true) record.migrated = true;
+      return record;
+    }
+
+    function legacyAttributionSignature(raw){
+      if (typeof raw !== 'string' || !raw) return '';
+      var hash = 2166136261;
+      for (var i = 0; i < raw.length; i++) {
+        hash ^= raw.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      return raw.length.toString(36) + '-' + (hash >>> 0).toString(36);
+    }
+
+    function validLegacyVersions(value){
+      var versions = {};
+      var source = value && typeof value === 'object' ? value : {};
+      legacyAttributionKeys.forEach(function(key){
+        var signature = typeof source[key] === 'string' ? source[key].slice(0, 40) : '';
+        if (/^[a-z0-9]+-[a-z0-9]+$/i.test(signature)) versions[key] = signature;
+      });
+      return versions;
+    }
+
+    function earlierStoredEntry(left, right){
+      if (!left || !Object.keys(left).length) return right || {};
+      if (!right || !Object.keys(right).length) return left;
+      if (!left.capturedAt) return right.capturedAt ? right : left;
+      if (!right.capturedAt) return left;
+      return left.capturedAt <= right.capturedAt ? left : right;
+    }
+
+    function normalizeCanonicalForWrite(value, now){
+      var state = emptyAttributionState(now);
+      if (!value || typeof value !== 'object') return state;
+      state.journeyId = safeClickId(value.journeyId) || state.journeyId;
+      state.startedAt = plausibleAttributionDate(value.startedAt, now) || now;
+      state.migrationCompletedAt = plausibleAttributionDate(value.migrationCompletedAt, now);
+      state.legacyVersions = validLegacyVersions(value.legacyVersions);
+      state.firstEntry = storedEntry(value.firstEntry, now);
+      state.firstFree = storedEntry(value.firstFree, now);
+      var paid = paidRecord(value.lastPaid, value, now, false);
+      if (paid && paid.capturedAt && paid.capturedAt + attributionTtlMs <= now) {
+        var paidRotation = emptyAttributionState(now);
+        paidRotation.migrationCompletedAt = now;
+        paidRotation.legacyVersions = state.legacyVersions;
+        return paidRotation;
+      }
+      if ((!paid || !paid.capturedAt) && state.startedAt + attributionTtlMs <= now) {
+        var directRotation = emptyAttributionState(now);
+        directRotation.migrationCompletedAt = now;
+        directRotation.legacyVersions = state.legacyVersions;
+        return directRotation;
+      }
+      if (paid) state.lastPaid = paid;
+      state.expiresAt = paid && paid.capturedAt ? paid.capturedAt + attributionTtlMs : 0;
+      return state;
+    }
+
+    function canonicalValueIsActiveForWrite(value, now){
+      if (!value || typeof value !== 'object') return false;
+      var paid = paidRecord(value.lastPaid, value, now, false);
+      if (paid && paid.capturedAt) return paid.capturedAt + attributionTtlMs > now;
+      var startedAt = plausibleAttributionDate(value.startedAt, now);
+      return Boolean(startedAt && startedAt + attributionTtlMs > now);
+    }
+
+    function migrateAttributionState(now){
+      var state = normalizeCanonicalForWrite(storageRecord(canonicalAttributionKey), now);
+      var candidates = [];
+      if (hasStoredPaid(state.lastPaid)) candidates.push(state.lastPaid);
+      legacyAttributionKeys.forEach(function(key){
+        var raw;
+        try { raw = localStorage.getItem(key); }
+        catch (_) { return; }
+        var signature = legacyAttributionSignature(raw);
+        if (!signature || state.legacyVersions[key] === signature) return;
+        var legacy;
+        try { legacy = JSON.parse(raw); }
+        catch (_) { legacy = null; }
+        if (legacy && typeof legacy === 'object') {
+          var candidate = paidRecord(legacy, legacy, now, true);
+          if (candidate && (!candidate.capturedAt || candidate.capturedAt + attributionTtlMs > now)) {
+            candidates.push(candidate);
+          }
+          var legacyEntry = storedEntry(legacy.firstEntry, now);
+          var legacyFree = storedEntry(legacy.firstFree, now);
+          if (legacyEntry.capturedAt && legacyEntry.capturedAt + attributionTtlMs > now) {
+            state.firstEntry = earlierStoredEntry(state.firstEntry, legacyEntry);
+          }
+          if (legacyFree.capturedAt && legacyFree.capturedAt + attributionTtlMs > now) {
+            state.firstFree = earlierStoredEntry(state.firstFree, legacyFree);
+          }
+        }
+        state.legacyVersions[key] = signature;
+        state.migrationCompletedAt = now;
+      });
+      var dated = candidates.filter(function(candidate){ return candidate.capturedAt > 0; });
+      if (dated.length) {
+        dated.sort(function(left, right){
+          if (left.capturedAt !== right.capturedAt) return right.capturedAt - left.capturedAt;
+          return (right.eventId || '') > (left.eventId || '') ? 1 : -1;
+        });
+        state.lastPaid = dated[0];
+      } else if (candidates.length) {
+        state.lastPaid = candidates[0];
+      }
+      state.expiresAt = state.lastPaid && state.lastPaid.capturedAt ?
+        state.lastPaid.capturedAt + attributionTtlMs : 0;
+      return state;
+    }
+
+    function statePaidTime(state){
+      return hasStoredPaid(state && state.lastPaid) ? Number(state.lastPaid.capturedAt || 0) : 0;
+    }
+
+    function statePaidIsNewer(left, right){
+      var leftTime = statePaidTime(left);
+      var rightTime = statePaidTime(right);
+      if (leftTime !== rightTime) return leftTime > rightTime;
+      var leftEvent = left && left.lastPaid && left.lastPaid.eventId || '';
+      var rightEvent = right && right.lastPaid && right.lastPaid.eventId || '';
+      return leftEvent > rightEvent;
+    }
+
+    function mergeWriterStates(state, current){
+      if (!current) return state;
+      if (current.journeyId === state.journeyId) {
+        state.firstEntry = earlierStoredEntry(state.firstEntry, current.firstEntry);
+        state.firstFree = earlierStoredEntry(state.firstFree, current.firstFree);
+        state.migrationCompletedAt = Math.max(
+          state.migrationCompletedAt || 0, current.migrationCompletedAt || 0
+        );
+        state.legacyVersions = Object.assign({}, current.legacyVersions, state.legacyVersions);
+        if (statePaidIsNewer(current, state)) {
+          state.lastPaid = current.lastPaid;
+          state.expiresAt = current.expiresAt;
+          state.legacyVersions = Object.assign({}, state.legacyVersions, current.legacyVersions);
+        }
+      } else if (statePaidIsNewer(current, state) ||
+        (!statePaidTime(state) && Number(current.startedAt || 0) > Number(state.startedAt || 0))) {
+        state = current;
+      }
+      return state;
+    }
+
+    function writePaidJournalSync(state, contextPending){
+      var eventId = safeClickId(state && state.lastPaid && state.lastPaid.eventId);
+      if (!eventId) return false;
+      try {
+        localStorage.setItem(paidJournalPrefix + eventId, JSON.stringify({
+          schemaVersion: 1,
+          contextPending: contextPending === true,
+          journeyId: state.journeyId,
+          startedAt: state.startedAt,
+          firstEntry: state.firstEntry,
+          firstFree: state.firstFree,
+          lastPaid: state.lastPaid
+        }));
+        return true;
+      } catch (_) { return false; }
+    }
+
+    function readLatestPaidJournalForWrite(now, excludedEventId){
+      var valid = [];
+      var removals = [];
+      try {
+        var length = Number(localStorage.length) || 0;
+        var keys = [];
+        for (var i = 0; i < length; i++) {
+          var key = localStorage.key(i);
+          if (typeof key === 'string' && key.indexOf(paidJournalPrefix) === 0) keys.push(key);
+        }
+        keys.forEach(function(key){
+          var record = storageRecord(key);
+          var rawPaid = record && record.lastPaid;
+          var rawCapturedAt = firstValidTime([
+            rawPaid && rawPaid.capturedAt,
+            rawPaid && rawPaid.captured_at,
+            rawPaid && rawPaid.at
+          ], 0);
+          // Another tab can race this document in tests or during a clock
+          // adjustment. Never delete an entry merely because it appears to be
+          // in the future; leave it for a later, plausible read.
+          if (rawCapturedAt > now + 5 * 60 * 1000) return;
+          var paid = paidRecord(record && record.lastPaid, record, now, false);
+          if (paid && paid.eventId === excludedEventId) return;
+          if (!paid || !paid.capturedAt || paid.capturedAt + attributionTtlMs <= now) {
+            removals.push(key);
+            return;
+          }
+          valid.push({
+            journalKey: key,
+            contextPending: record.contextPending === true,
+            journeyId: safeClickId(record.journeyId),
+            startedAt: plausibleAttributionDate(record.startedAt, now),
+            firstEntry: storedEntry(record.firstEntry, now),
+            firstFree: storedEntry(record.firstFree, now),
+            lastPaid: paid,
+            expiresAt: paid.capturedAt + attributionTtlMs
+          });
+        });
+        valid.sort(function(left, right){
+          if (statePaidIsNewer(left, right)) return -1;
+          if (statePaidIsNewer(right, left)) return 1;
+          return 0;
+        });
+        valid.slice(maxPaidJournalEntries).forEach(function(candidate){
+          removals.push(candidate.journalKey);
+        });
+        removals.forEach(function(key){
+          try { localStorage.removeItem(key); }
+          catch (_) {}
+        });
+      } catch (_) {}
+      var latest = valid[0] || null;
+      if (latest && latest.contextPending) {
+        var resolved = valid.find(function(candidate){
+          return !candidate.contextPending && Boolean(candidate.journeyId);
+        });
+        if (resolved) latest = Object.assign({}, latest, {
+          journeyId: resolved.journeyId,
+          startedAt: resolved.startedAt,
+          firstEntry: resolved.firstEntry,
+          firstFree: resolved.firstFree
+        });
+      }
+      return latest;
+    }
+
+    function mergeWriterJournal(state, journal){
+      if (!journal) return state;
+      var sameJourney = Boolean(state.journeyId && state.journeyId === journal.journeyId);
+      if (sameJourney) {
+        state.firstEntry = earlierStoredEntry(state.firstEntry, journal.firstEntry);
+        state.firstFree = earlierStoredEntry(state.firstFree, journal.firstFree);
+      }
+      if (!statePaidIsNewer(journal, state)) return state;
+      state.journeyId = journal.journeyId || state.journeyId;
+      state.startedAt = journal.startedAt || state.startedAt;
+      state.firstEntry = sameJourney ? state.firstEntry :
+        (journal.firstEntry && Object.keys(journal.firstEntry).length ? journal.firstEntry : state.firstEntry);
+      state.firstFree = sameJourney ? state.firstFree :
+        (journal.firstFree && Object.keys(journal.firstFree).length ? journal.firstFree : state.firstFree);
+      state.lastPaid = journal.lastPaid;
+      state.expiresAt = journal.expiresAt;
+      return state;
+    }
+
+    function paidStateFromTouch(touch){
+      return Object.assign(entryFromTouch(touch), {
+        clickIds: clickIdsFromTouch(touch),
+        capturedAt: touch._time,
+        dateUncertain: false,
+        eventId: generatedJourneyId()
+      });
+    }
+
+    function initializeAttributionFallback(){
+      if (!trackingAllowed()) return;
+      var now = Date.now();
+      try {
+        var state = migrateAttributionState(now);
+        state = mergeWriterJournal(state, readLatestPaidJournalForWrite(now, ''));
+        var pageTouch = touchFromPage(pageObservedAt);
+        if (!state.firstEntry || !Object.keys(state.firstEntry).length) {
+          state.firstEntry = entryFromTouch(pageTouch);
+        }
+        if ((!state.firstFree || !Object.keys(state.firstFree).length) && pageTouch._free) {
+          state.firstFree = entryFromTouch(pageTouch);
+        }
+        if (pageTouch._paid) {
+          var pagePaid = paidStateFromTouch(pageTouch);
+          var candidate = Object.assign({}, state, {
+            lastPaid: pagePaid,
+            expiresAt: pageTouch._time + attributionTtlMs
+          });
+          writePaidJournalSync(candidate, true);
+          // A newer journal (or an equal-time click with a higher event ID)
+          // must beat an older URL left open in another tab.
+          var competingJournal = readLatestPaidJournalForWrite(now, pagePaid.eventId);
+          writePaidJournalSync(candidate, false);
+          state = statePaidIsNewer(candidate, state) ? candidate : state;
+          state = mergeWriterJournal(state, competingJournal);
+        }
+        var currentRaw = storageRecord(canonicalAttributionKey);
+        if (canonicalValueIsActiveForWrite(currentRaw, now)) {
+          state = mergeWriterStates(state, normalizeCanonicalForWrite(currentRaw, now));
+        }
+        state = mergeWriterJournal(state, readLatestPaidJournalForWrite(now, ''));
+        state.schemaVersion = 3;
+        state.writer = 'pmp-storefront-fallback-v3';
+        state.expiresAt = state.lastPaid && state.lastPaid.capturedAt ?
+          state.lastPaid.capturedAt + attributionTtlMs : 0;
+        localStorage.setItem(canonicalAttributionKey, JSON.stringify(state));
+      } catch (_) {}
+    }
+
     var sensitiveTrackingKeys = [
       'attribution_model', 'journey_id', 'landing_url', 'referrer',
       'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
@@ -528,8 +965,8 @@ const JS = String.raw`(function(){
       Object.keys(body).forEach(function(key){
         if (/^first_free_/.test(key) || /^last_paid_/.test(key)) delete body[key];
       });
-      // Never run the retired v1 writer here. The Custom Pixel owns capture;
-      // this bridge performs only read-only fallbacks during the phased rollout.
+      // Capture already ran once at document initialization. Checkout performs
+      // only reads so opening checkout cannot renew or replace a paid window.
       var state = readCanonicalAttribution(now);
       var journalState = readPaidJournalAttribution(now);
       var pageTouch = touchFromPage(pageObservedAt);
@@ -569,9 +1006,10 @@ const JS = String.raw`(function(){
       if (existingFbp) body.fbp = existingFbp;
     }
 
-    // Deliberately no attribution initialization or write: pmp:attribution:v1
-    // and pmp_paid_attribution_v3 are read-only rollout fallbacks. The Custom
-    // Pixel is the sole owner of capture and migration.
+    // Run once per document behind __pmpCheckoutCountryBridge. This introduces
+    // no popup and performs no storage access when Shopify explicitly reports
+    // that tracking is unavailable.
+    initializeAttributionFallback();
 
     function cleanEventValue(value, fallback, maxLength){
       var clean = String(value == null ? '' : value).trim();
@@ -638,7 +1076,7 @@ const JS = String.raw`(function(){
       setTimeout(retryGtagGuard, 250);
     }
 
-    // Google may have loaded before this ScriptTag or may define gtag later.
+    // Google may have loaded before this helper or may define gtag later.
     // Retry for at most 30 seconds; no permanent timer or property trap remains.
     retryGtagGuard();
 
