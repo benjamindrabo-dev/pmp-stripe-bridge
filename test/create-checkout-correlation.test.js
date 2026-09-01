@@ -310,6 +310,91 @@ test("persists first-entry, first-free and last-paid attribution in Stripe and R
   assert.ok(sessionMetadataKeys.length <= 50, `Stripe Session metadata uses ${sessionMetadataKeys.length}/50 keys`);
 });
 
+test("preserves journey, Display and Snapchat identifiers across Stripe and Redis", async (t) => {
+  installEnvironment(t);
+  const calls = mockServices();
+  const res = responseHarness();
+
+  await handler(checkoutRequest({
+    journey_id: "journey-checkout-123456",
+    dclid: "Display_Click_123456",
+    sccid: "Snap_Click_123456",
+  }), res);
+
+  assert.equal(res.statusCode, 200);
+  const stripe = calls.stripe[0];
+  const redis = calls.redis[0];
+  assert.equal(stripe.get("metadata[journey_id]"), "journey-checkout-123456");
+  assert.equal(stripe.get("metadata[dclid]"), "Display_Click_123456");
+  assert.equal(stripe.get("metadata[sccid]"), "Snap_Click_123456");
+  assert.equal(redis.journey_id, "journey-checkout-123456");
+  assert.equal(redis.dclid, "Display_Click_123456");
+  assert.equal(redis.sccid, "Snap_Click_123456");
+});
+
+test("reserves two Stripe metadata slots for the campaign wrapper at maximum input", async (t) => {
+  installEnvironment(t);
+  const calls = mockServices();
+  const res = responseHarness();
+  const touch = {
+    first_entry_landing_url: "https://shop.example/blogs/news/entry",
+    first_entry_referrer: "https://www.google.com/",
+    first_entry_source: "google",
+    first_entry_medium: "organic",
+    first_entry_campaign: "entry_campaign",
+    first_entry_at: "2026-08-01T12:00:00.000Z",
+    first_touch_landing_url: "https://shop.example/pages/free",
+    first_touch_referrer: "https://l.instagram.com/",
+    first_touch_source: "instagram",
+    first_touch_medium: "dm",
+    first_touch_campaign: "free_campaign",
+    first_touch_at: "2026-08-02T12:00:00.000Z",
+    last_touch_landing_url: "https://shop.example/products/paid",
+    last_touch_referrer: "https://www.google.com/",
+    last_touch_source: "google",
+    last_touch_medium: "cpc",
+    last_touch_campaign: "paid_campaign",
+    last_touch_at: "2026-08-03T12:00:00.000Z",
+  };
+
+  await handler(checkoutRequest({
+    email: "maximum@example.com",
+    shopify_cart_token: "cart_maximum_123",
+    shopify_cart_url: "https://shop.example/cart?view=bridge",
+    journey_id: "journey-maximum-123456",
+    fbp: "fb.1.1700000000000.123456789012345",
+    fbc: "fb.1.1700000000000.Meta_Click_123456",
+    landing_url: "https://shop.example/products/paid",
+    referrer: "https://www.google.com/",
+    utm_source: "google",
+    utm_medium: "cpc",
+    utm_campaign: "paid_campaign",
+    utm_content: "asset_group",
+    utm_term: "dog health",
+    gclid: "Gclid_Click_123456",
+    gbraid: "Gbraid_Click_123456",
+    wbraid: "Wbraid_Click_123456",
+    dclid: "Display_Click_123456",
+    fbclid: "Meta_Click_123456",
+    ttclid: "TikTok_Click_123456",
+    msclkid: "0123456789abcdef0123456789abcdef",
+    sccid: "Snap_Click_123456",
+    ga_client_id: "123456789.1700000000",
+    ga_session_id: "1700000000",
+    ga_session_number: "2",
+    attribution_model: "last_paid_else_first_free_v1",
+    ...touch,
+  }), res);
+
+  assert.equal(res.statusCode, 200);
+  const stripe = calls.stripe[0];
+  const keys = [...stripe.keys()].filter((key) => key.startsWith("metadata["));
+  assert.equal(keys.length, 48, `base handler must reserve 2 of Stripe's 50 slots; got ${keys.length}`);
+  for (const key of ["tracking_version", "journey_id", "shopify_cart_token", "gclid", "dclid", "fbclid", "sccid"]) {
+    assert.ok(stripe.get(`metadata[${key}]`), `critical metadata ${key}`);
+  }
+});
+
 test("rejects untrusted identifiers and removes email addresses from attribution", async (t) => {
   installEnvironment(t);
   const calls = mockServices();
@@ -317,14 +402,17 @@ test("rejects untrusted identifiers and removes email addresses from attribution
 
   await handler(checkoutRequest({
     external_id: "shopper@example.com",
+    journey_id: "J".repeat(256),
     fbp: "shopper@example.com",
     fbc: "fb.1.not-a-time.shopper@example.com",
     gclid: "shopper@example.com",
     gbraid: "bad id with spaces",
     wbraid: "test",
     fbclid: "shopper@example.com",
+    dclid: "A".repeat(256),
     ttclid: "javascript:alert(1)",
     msclkid: "not/a/click/id",
+    sccid: "snapper@example.com",
     utm_source: "shopper@example.com",
     first_entry_landing_url: "https://shop.example/customer/shopper%40example.com/orders?secret=1",
     first_entry_referrer: "https://email.example/click/shopper%2540example.com?secret=1",
@@ -337,8 +425,8 @@ test("rejects untrusted identifiers and removes email addresses from attribution
   const stripe = calls.stripe[0];
   const redis = calls.redis[0];
   for (const key of [
-    "person_id", "browser_id", "fbp", "fbc", "gclid", "gbraid", "wbraid", "fbclid",
-    "ttclid", "msclkid", "utm_source", "first_entry_source", "last_touch_campaign",
+    "person_id", "browser_id", "journey_id", "fbp", "fbc", "gclid", "gbraid", "wbraid", "fbclid",
+    "dclid", "ttclid", "msclkid", "sccid", "utm_source", "first_entry_source", "last_touch_campaign",
   ]) {
     assert.equal(stripe.get(`metadata[${key}]`), null, `Stripe omits ${key}`);
     const redisKey = key === "browser_id" || key === "person_id" ? "external_id" : key;

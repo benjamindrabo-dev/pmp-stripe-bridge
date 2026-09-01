@@ -54,70 +54,93 @@ Successful Shopify `POST /cart/add.js` and `POST /cart/add` responses emit a
 Clarity `add_to_cart`. No additional GA4 `add_to_cart` is sent because Shopify's
 pixel already owns that event; duplicating it here would inflate the funnel.
 
-## Acquisition attribution (90 days, consent-aware)
+## Acquisition attribution (native Shopify Custom Pixel, 90 days)
 
-The live ScriptTag keeps up to three independent browser records for at most 90
-days. They are not three competing versions of the same source:
+The permanent owner is the Shopify Custom Pixel **PMP Paid Attribution**, whose
+paste-ready source is `shopify/pmp-paid-attribution.custom-pixel.js`. Install it
+once in **Settings → Customer events → Add custom pixel**, connect it, and test
+it before disconnecting the old theme capture. It stores schema version 3 under
+the sole canonical key `pmp:attribution`; publishing a theme cannot remove the
+pixel because Customer Events configuration belongs to the shop.
 
-- **First entry** — the first page, referrer, source, medium, campaign, and time
-  observed by this version of the tracker. It is set once, even when that first
-  visit is direct.
-- **First free touch** — the first identifiable non-paid acquisition, such as
-  organic search, a Google free listing, a referral, a tagged Instagram DM, or
-  a tagged profile link. It is set once and is not replaced by later free or
-  direct visits.
-- **Last paid touch** — the newest visit that contains reliable evidence of a
-  paid click. A newer paid click replaces the older paid touch.
+The pixel recognizes `gclid`, `gbraid`, `wbraid`, `dclid`, `fbclid`, `msclkid`,
+`ttclid`, and `sccid`. Under this shop's explicit contract, any one of those
+eight identifiers is a paid click. An explicitly paid UTM medium such as `cpc`
+or `paid_social` is also retained when a platform supplies no click ID. A newer
+paid touch replaces `lastPaid` and starts a new 90-day window. The pixel also
+keeps the earliest identifiable unpaid acquisition in `firstFree`. Direct or
+organic navigation, including Shopify Markets paths such as `/en-ca/`, never
+clears or renews an active paid click. Events are serialized within each pixel
+runtime; because Shopify's asynchronous storage API has no compare-and-swap,
+bounded re-read/repair rounds also make simultaneous tabs converge on the newest
+dated click on a best-effort basis. Storage dates are Unix milliseconds.
+The sole public state contract remains `pmp:attribution`. Small immutable
+`pmp:attribution:paid:<event-id>` journal entries prevent a genuinely concurrent
+tab from destroying a paid click; the pixel removes them after their 90-day TTL,
+retains at most the 64 newest active entries, and lets the checkout bridge repair
+a briefly stale canonical state.
 
-At checkout, the primary order attribution model is
-`last_paid_else_first_free_v1`: use the latest paid touch when one exists;
-otherwise use the first free touch. If neither exists, the current session is
-the fallback. A later direct return does not overwrite an earlier identified
-source. The tracker also re-reads the shared record immediately before checkout
-so a newer paid visit captured in another tab is not missed.
+Persistent URLs retain only validated click IDs and the five explicit `utm_*`
+fields. Arbitrary query parameters, fragments, credentials, email-like values
+and sensitive checkout/account/order paths are removed before storage. A direct
+journey with no paid click rotates after 90 days; an active paid journey rotates
+when its own 90-day paid window expires.
 
-Paid classification is deliberately strict. `gclid`, `gbraid`, `wbraid`,
-`msclkid`, `ttclid`, or an explicitly paid medium such as `cpc`, `ppc`,
-`paid_search`, or `paid_social` are paid evidence. `fbclid` and `_fbc` identify
-a Facebook/Instagram click but, on their own, do **not** prove that the click
-was an ad. For Meta ads, keep an explicit paid medium in the destination URL.
+Before capture, the pixel checks `pmp_paid_attribution_v3` and
+`pmp:attribution:v1`. It imports each new or changed legacy record once, selects
+the newest reliably dated paid click, never lets an empty record win, and leaves
+both legacy keys intact. This also recovers valid clicks written during a
+temporary rollback. An undated legacy click is retained with
+`dateUncertain: true` and `expiresAt: 0`: it remains auditable but is not silently
+granted a new 90-day validity period. Expired dated paid records are removed
+from the canonical state on the next pixel event. Migration is idempotent.
 
-Examples of tagged destination links (append the parameters to the real product
-URL):
+Shopify custom pixels run in a sandbox. Their official `browser.localStorage`
+API is asynchronous, and pixels can subscribe to `checkout_started` and
+`checkout_completed`; they do not have storefront DOM access and should not be
+assumed able to mutate Ajax cart attributes. This code adds no consent popup or
+visitor interaction; it runs automatically whenever Shopify executes the
+connected pixel. See Shopify's
+[custom pixel API](https://shopify.dev/docs/api/web-pixels-api/standard-api/browser) and
+[standard events](https://shopify.dev/docs/api/web-pixels-api/standard-events).
 
-- Meta ad: `?utm_source=meta&utm_medium=paid_social&utm_campaign=yeast_sales`
-- Instagram DM: `?utm_source=instagram&utm_medium=dm&utm_campaign=customer_dm`
-- Instagram profile: `?utm_source=instagram&utm_medium=organic_social&utm_campaign=profile`
+This shop uses **external Stripe Embedded Checkout**, not native Shopify
+checkout. Therefore no cart-attribute theme bridge is needed: the existing
+ScriptTag reads attribution immediately before `/api/create-checkout` and never
+writes it. During the phased rollout, if the canonical pixel record is not ready
+yet, it can still read an active legacy paid record or the current paid URL
+without renewing that storage. The request carries `journey_id`, the active
+click IDs, and capture time into Stripe Session metadata and Redis. The Stripe
+webhook then creates the Shopify order
+and writes `pmp_journey_id` plus platform click identifiers into its note
+attributes. This provides a deterministic pixel → Stripe Session → Shopify
+order join without a third-party app once the canonical pixel state exists.
+During the very first asynchronous race before either the canonical state or its
+immutable journal entry exists, the read-only URL/legacy fallback still preserves
+the paid click ID, but it cannot invent a pixel `journey_id`. Existing
+session/event guards prevent duplicate checkout analytics.
 
-Add `utm_content=person_name` to a DM link when the report must distinguish the
-person or account that shared it. This only identifies a person when the shopper
-actually clicks that specific tagged link.
+### Deployment and rollback
 
-For continuity with earlier deployments, unexpired legacy records are read as a
-fallback. A legacy visit is migrated only when it can be classified clearly:
-paid evidence can seed the last paid touch, while a clearly free visit can seed
-the first free touch. Legacy last-touch data does not invent a historical first
-entry, and a stored legacy landing URL is not replayed as if it were a new paid
-visit. The literal first-entry record therefore starts with the first page seen
-by this tracker version.
+1. Deploy this bridge revision and confirm the production deployment is Ready.
+   Keep the existing theme attribution enabled during this step. The bridge's
+   read-only legacy fallback prevents an attribution gap before step 2.
+2. Paste the pixel source with the exact name **PMP Paid Attribution**, save,
+   connect, and verify the fake-ID scenarios in Shopify Pixel Helper/browser
+   storage. Then confirm a Stripe **test-mode** Session and test Shopify order
+   share `journey_id`/`pmp_journey_id`. Do not place a paid order.
+3. Neutralize the attribution section of `pmp-uniform-hotfix.js` in the source
+   theme (retain its unrelated functions). The live ScriptTag in this repository
+   is already neutralized, so future themes cannot make it a competing writer.
+4. Roll back by disconnecting **PMP Paid Attribution** and redeploying the prior
+   bridge commit. Do not delete `pmp:attribution` or either legacy key; reconnecting
+   the pixel imports every still-valid legacy record that changed while it was off.
 
-The Shopify Customer Privacy API is checked when it is available. If it does
-not affirmatively allow tracking, the ScriptTag does not read or write these
-attribution records and does not inject advertising or analytics identifiers
-into the checkout request. A consent change to allowed is re-evaluated at
-checkout. See Shopify's [Customer Privacy API](https://shopify.dev/docs/api/customer-privacy).
-
-The chosen attribution and the raw records are carried through Stripe and into
-the Shopify order as a readable acquisition note plus machine-readable
-`attribution_*`, `first_entry_*`, `first_touch_*`/`first_free_*`, and
-`last_touch_*`/`last_paid_*` fields for reporting.
-
-These records have unavoidable limits:
-
-- They follow the same browser profile and device; they cannot automatically
-  join a phone visit to a later desktop purchase.
-- Clearing storage, private browsing, browser restrictions, expiry, or denied
-  consent can remove or prevent continuity.
+Remaining limits are browser/device continuity, storage clearing/private mode,
+consent restrictions, and the manual Shopify Admin installation step. Repository
+code cannot inspect the shop's configured app pixels/app embeds or connect a
+Custom Pixel without authenticated Admin access; audit those panels and browser
+storage/network listeners separately before retiring an unknown writer.
 - An unclicked Instagram/Facebook impression, an untagged DM, a manually typed
   URL, or a later Google brand search cannot be connected honestly to the
   earlier social exposure.

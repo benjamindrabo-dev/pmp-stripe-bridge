@@ -713,7 +713,9 @@ function safeAttributionAt(value) {
 }
 
 function safeClickId(value) {
-  const text = safeAttributionText(value, 255);
+  const raw = value == null ? "" : String(value).trim();
+  if (!raw || raw.length > 255) return null;
+  const text = safeAttributionText(raw, 255);
   if (!text || text.length < 6 || !/^[A-Za-z0-9._~-]+$/.test(text)) return null;
   return text;
 }
@@ -725,17 +727,18 @@ function safeFacebookBrowserId(value) {
   return match ? text : null;
 }
 
-// Google, Microsoft and TikTok click IDs are deterministic paid-click proof.
-// Meta's fbc/fbclid are retained for matching, but are deliberately NOT proof
-// of paid traffic: organic Facebook and Instagram links can carry fbclid too.
+// The shop's explicit attribution contract treats these eight redirect IDs as
+// paid-click evidence. fbc remains a matching cookie and is not proof alone.
 function validatedClickIds(attribution) {
   const data = attribution || {};
   return {
     gclid: safeClickId(data.gclid),
     gbraid: safeClickId(data.gbraid),
     wbraid: safeClickId(data.wbraid),
+    dclid: safeClickId(data.dclid),
     msclkid: safeClickId(data.msclkid),
     ttclid: safeClickId(data.ttclid),
+    sccid: safeClickId(data.sccid),
     fbclid: safeClickId(data.fbclid),
     fbc: safeFacebookBrowserId(data.fbc),
   };
@@ -743,7 +746,7 @@ function validatedClickIds(attribution) {
 
 function googleAdsClickIds(attribution) {
   const ids = validatedClickIds(attribution);
-  return ["gclid", "gbraid", "wbraid"].flatMap((type) => ids[type] ? [{ type, value: ids[type] }] : []);
+  return ["gclid", "gbraid", "wbraid", "dclid"].flatMap((type) => ids[type] ? [{ type, value: ids[type] }] : []);
 }
 
 function searchEngineFromReferrer(referrer) {
@@ -809,6 +812,7 @@ function sourcePlatform(source) {
   if (["meta", "facebook", "instagram", "fb", "ig"].includes(src) || /(^|_)(facebook|instagram)($|_)/.test(src)) return "meta";
   if (["microsoft", "microsoft_ads", "bing", "bing_ads"].includes(src)) return "microsoft";
   if (["tiktok", "tik_tok", "tiktok_ads"].includes(src)) return "tiktok";
+  if (["snapchat", "snap", "snapchat_ads", "snap_ads"].includes(src)) return "snapchat";
   return null;
 }
 
@@ -818,6 +822,7 @@ function socialSourceLabel(source) {
   if (src === "facebook" || src === "fb") return "Facebook";
   if (src === "meta") return "Meta";
   if (src === "tiktok" || src === "tik_tok") return "TikTok";
+  if (src === "snapchat" || src === "snap") return "Snapchat";
   return safeAttributionText(source, 100) || "Social";
 }
 
@@ -826,6 +831,7 @@ function paidPlatformLabel(platform, source) {
   if (platform === "meta") return "Meta Ads (paid)";
   if (platform === "microsoft") return "Microsoft Ads (paid)";
   if (platform === "tiktok") return "TikTok Ads (paid)";
+  if (platform === "snapchat") return "Snapchat Ads (paid)";
   return `${safeAttributionText(source, 100) || "Paid"} Ads (paid)`;
 }
 
@@ -878,11 +884,16 @@ export function classifyEntryChannel({ attribution, source, medium, campaign, re
   let platform = sourcePlatform(src);
 
   if (allowClickIds && !platform) {
-    if (ids.gclid || ids.gbraid || ids.wbraid) platform = "google";
+    if (ids.gclid || ids.gbraid || ids.wbraid || ids.dclid) platform = "google";
     else if (ids.msclkid) platform = "microsoft";
     else if (ids.ttclid) platform = "tiktok";
+    else if (ids.sccid) platform = "snapchat";
+    else if (ids.fbclid) platform = "meta";
   }
-  const hasPaidProof = allowClickIds && Boolean(ids.gclid || ids.gbraid || ids.wbraid || ids.msclkid || ids.ttclid);
+  const hasPaidProof = allowClickIds && Boolean(
+    ids.gclid || ids.gbraid || ids.wbraid || ids.dclid || ids.fbclid ||
+    ids.msclkid || ids.ttclid || ids.sccid
+  );
   if (hasPaidProof || paidMedium(med)) {
     return { label: paidPlatformLabel(platform, source), seo: false, freeListing: false, paid: true, platform };
   }
@@ -1043,6 +1054,7 @@ export async function createShopifyOrder({ items, currency, email, phone, shippi
   if (!Number.isInteger(charged) || charged < 0) throw new Error("Invalid signed Stripe amount");
   const noteAttributes = sessionId ? [{ name: "stripe_session_id", value: String(sessionId) }] : [];
   const bridgeCorrelation = {
+    pmp_journey_id: attribution && attribution.journey_id,
     shopify_cart_token: attribution && attribution.shopify_cart_token,
     bridge_client_reference_id: attribution && attribution.client_reference_id,
     bridge_started_at: attribution && attribution.bridge_started_at,
@@ -1059,7 +1071,7 @@ export async function createShopifyOrder({ items, currency, email, phone, shippi
   }
   if (clickIds.msclkid) noteAttributes.push({ name: "microsoft_ads_msclkid", value: clickIds.msclkid });
   if (clickIds.ttclid) noteAttributes.push({ name: "tiktok_ads_ttclid", value: clickIds.ttclid });
-  // Neutral names are intentional: fbc/fbclid alone do not prove an ad click.
+  if (clickIds.sccid) noteAttributes.push({ name: "snapchat_ads_sccid", value: clickIds.sccid });
   if (clickIds.fbc) noteAttributes.push({ name: "meta_fbc", value: clickIds.fbc });
   if (clickIds.fbclid) noteAttributes.push({ name: "meta_fbclid", value: clickIds.fbclid });
 
@@ -1068,6 +1080,9 @@ export async function createShopifyOrder({ items, currency, email, phone, shippi
     noteAttributes.push({ name: `${paidPlatform}_ads_paid`, value: "yes" });
     if (paidPlatform === "meta" && clickIds.fbc) {
       noteAttributes.push({ name: "meta_ads_fbc", value: clickIds.fbc });
+    }
+    if (paidPlatform === "meta" && clickIds.fbclid) {
+      noteAttributes.push({ name: "meta_ads_fbclid", value: clickIds.fbclid });
     }
   }
   Object.entries(attributionSummary.attributes).forEach(([name, value]) => {

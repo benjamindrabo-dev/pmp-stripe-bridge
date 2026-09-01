@@ -89,8 +89,11 @@ test("normalizes paid medium spaces and hyphens and recognizes every supported a
     ["google", "paid search", {}, "Google Ads (paid)", "google"],
     ["ig", "paid-social", {}, "Meta Ads (paid)", "meta"],
     ["fb", "paid social", {}, "Meta Ads (paid)", "meta"],
+    [null, null, { dclid: "Display_Click_123456" }, "Google Ads (paid)", "google"],
+    [null, null, { fbclid: "Meta_Click_123456" }, "Meta Ads (paid)", "meta"],
     [null, null, { msclkid: "0123456789abcdef0123456789abcdef" }, "Microsoft Ads (paid)", "microsoft"],
     [null, null, { ttclid: "TikTok_Click_123456" }, "TikTok Ads (paid)", "tiktok"],
+    [null, null, { sccid: "Snap_Click_123456" }, "Snapchat Ads (paid)", "snapchat"],
   ];
   for (const [source, medium, attribution, label, platform] of cases) {
     const channel = classifyEntryChannel({ attribution, source, medium });
@@ -100,7 +103,7 @@ test("normalizes paid medium spaces and hyphens and recognizes every supported a
   }
 });
 
-test("does not treat fbclid or fbc alone as proof of paid Meta traffic", () => {
+test("treats fbclid as paid by contract while fbc alone remains only a matching cookie", () => {
   const channel = classifyEntryChannel({
     attribution: {
       fbclid: "OrganicMetaClick_123",
@@ -109,8 +112,8 @@ test("does not treat fbclid or fbc alone as proof of paid Meta traffic", () => {
     source: "instagram",
     medium: "organic social",
   });
-  assert.equal(channel.paid, false);
-  assert.equal(channel.label, "Instagram organic social (inferred)");
+  assert.equal(channel.paid, true);
+  assert.equal(channel.label, "Meta Ads (paid)");
 
   const selected = orderAttributionAttributes({
     fbc: "fb.1.1720000000000.OrganicMetaClick_123",
@@ -245,6 +248,7 @@ test("writes a human acquisition summary, report fields and attribution tags to 
   const order = await captureShopifyOrder({
     attribution: {
       tracking_version: "pmp_v4",
+      journey_id: "journey-order-123456",
       attribution_model: "last_paid_else_first_free_v1",
       first_entry_landing: "https://puremajestypet.com/blogs/news/dog-yeast-infection-treatment",
       first_entry_referrer: "https://www.google.com/",
@@ -271,6 +275,7 @@ test("writes a human acquisition summary, report fields and attribution tags to 
   assert.match(order.note, /Page: https:\/\/puremajestypet\.com\/products\/dog-yeast-infection-treatment\./);
   assert.match(order.note, /First entry: https:\/\/puremajestypet\.com\/blogs\/news\/dog-yeast-infection-treatment\./);
   assert.equal(attrs.attribution_model, "last_paid_else_first_free_v1");
+  assert.equal(attrs.pmp_journey_id, "journey-order-123456");
   assert.equal(attrs.attribution_basis, "last_paid_click");
   assert.equal(attrs.attribution_channel, "Meta Ads (paid)");
   assert.equal(attrs.first_entry_source, "google");
@@ -287,7 +292,7 @@ test("writes a human acquisition summary, report fields and attribution tags to 
   assert.doesNotMatch(order.tags, /seo_organic/);
 });
 
-test("tags free Shopping, SEO, Microsoft and TikTok attribution for Shopify reports", async () => {
+test("tags free Shopping, SEO and every paid click platform for Shopify reports", async () => {
   const explicitGooglePaid = await captureShopifyOrder({
     sessionId: "cs_test_google_utm_123",
     attribution: {
@@ -342,6 +347,30 @@ test("tags free Shopping, SEO, Microsoft and TikTok attribution for Shopify repo
   assert.equal(attributesMap(tiktok).tiktok_ads_paid, "yes");
   assert.equal(attributesMap(tiktok).tiktok_ads_ttclid, "TikTok_Click_123456");
   assert.match(tiktok.tags, /tiktok_ads_paid/);
+
+  const googleDisplay = await captureShopifyOrder({
+    sessionId: "cs_test_google_display_123",
+    attribution: { dclid: "Display_Click_123456" },
+  });
+  assert.equal(attributesMap(googleDisplay).google_ads_paid, "yes");
+  assert.equal(attributesMap(googleDisplay).google_ads_dclid, "Display_Click_123456");
+  assert.match(googleDisplay.tags, /google_ads_paid/);
+
+  const snapchat = await captureShopifyOrder({
+    sessionId: "cs_test_snapchat_123",
+    attribution: { sccid: "Snap_Click_123456" },
+  });
+  assert.equal(attributesMap(snapchat).snapchat_ads_paid, "yes");
+  assert.equal(attributesMap(snapchat).snapchat_ads_sccid, "Snap_Click_123456");
+  assert.match(snapchat.tags, /snapchat_ads_paid/);
+
+  const metaRedirect = await captureShopifyOrder({
+    sessionId: "cs_test_meta_redirect_123",
+    attribution: { fbclid: "Meta_Click_123456" },
+  });
+  assert.equal(attributesMap(metaRedirect).meta_ads_paid, "yes");
+  assert.equal(attributesMap(metaRedirect).meta_ads_fbclid, "Meta_Click_123456");
+  assert.match(metaRedirect.tags, /meta_ads_paid/);
 });
 
 test("removes invalid click IDs and PII from attribution before creating the Shopify order", async () => {
