@@ -15,14 +15,13 @@ const JS = String.raw`(function(){
     var ga4Destination = 'G-KKS5T7SPHR';
     var gtagGuardAttempts = 0;
     var maxGtagGuardAttempts = 120;
-    var attributionStorageKey = 'pmp:attribution:v1';
-    var attributionSessionKey = 'pmp:attribution:session-landing:v1';
+    // Attribution capture belongs to the native Shopify Custom Pixel. This
+    // ScriptTag is only the thin checkout bridge and never writes attribution.
+    var canonicalAttributionKey = 'pmp:attribution';
+    var paidJournalPrefix = 'pmp:attribution:paid:';
     var attributionModel = 'last_paid_else_first_free_v1';
     var attributionTtlMs = 90 * 24 * 60 * 60 * 1000;
-    var attributionSessionTtlMs = 30 * 60 * 1000;
-    var attributionState = null;
-    var attributionInitialized = false;
-    var currentSessionTouch = null;
+    var pageObservedAt = Date.now();
 
     function trackingAllowed(){
       var privacy = window.Shopify && window.Shopify.customerPrivacy;
@@ -76,8 +75,10 @@ const JS = String.raw`(function(){
     }
 
     function safeClickId(value){
-      var clean = attributionText(value, 300);
-      return /^[A-Za-z0-9][A-Za-z0-9._~-]{5,299}$/.test(clean) ? clean : '';
+      var raw = String(value == null ? '' : value).trim();
+      if (raw.length > 255) return '';
+      var clean = attributionText(raw, 255);
+      return /^[A-Za-z0-9][A-Za-z0-9._~-]{5,254}$/.test(clean) ? clean : '';
     }
 
     function safeFacebookCookie(value, prefix){
@@ -101,7 +102,9 @@ const JS = String.raw`(function(){
 
     function touchTime(value, fallback){
       var numeric = Number(value);
-      if (Number.isFinite(numeric) && numeric > 0) return numeric;
+      if (Number.isFinite(numeric) && numeric > 0) {
+        return numeric < 100000000000 ? numeric * 1000 : numeric;
+      }
       var parsed = Date.parse(String(value || ''));
       return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
     }
@@ -137,10 +140,11 @@ const JS = String.raw`(function(){
       } catch (_) { return { source: 'direct', medium: 'none' }; }
     }
 
-    function touchFromValues(values, now){
+    function touchFromValues(values, now, allowPageFallback){
       var rawLanding = plainAttributionText(values && (values.landing_url || values.landing), 1500);
       var landingParams;
-      try { landingParams = new URL(rawLanding || location.href, location.href).searchParams; }
+      var fallbackUrl = allowPageFallback === false ? 'https://puremajestypet.com/' : location.href;
+      try { landingParams = new URL(rawLanding || fallbackUrl, fallbackUrl).searchParams; }
       catch (_) { landingParams = new URLSearchParams(''); }
       function supplied(name, fallbackName){
         var direct = values && (values[name] || (fallbackName && values[fallbackName]));
@@ -157,27 +161,28 @@ const JS = String.raw`(function(){
       var gclid = safeClickId(supplied('gclid'));
       var gbraid = safeClickId(supplied('gbraid'));
       var wbraid = safeClickId(supplied('wbraid'));
+      var dclid = safeClickId(supplied('dclid'));
       var fbclid = safeClickId(supplied('fbclid'));
       var ttclid = safeClickId(supplied('ttclid'));
       var msclkid = safeClickId(supplied('msclkid'));
+      var sccid = safeClickId(supplied('sccid'));
       var fbc = safeFacebookCookie(values && values.fbc, 'fbc');
 
       if (!source) {
-        if (gclid || gbraid || wbraid) source = 'google';
+        if (gclid || gbraid || wbraid || dclid) source = 'google';
         else if (msclkid) source = 'microsoft';
         else if (ttclid) source = 'tiktok';
-        // A bare fbclid proves a Meta redirect, not that the click was paid.
-        else if (fbclid) source = inferred.source !== 'direct' ? inferred.source : 'meta';
+        else if (sccid) source = 'snapchat';
+        else if (fbclid) source = 'meta';
         else source = inferred.source;
       }
       if (!medium) {
-        if (gclid || gbraid || wbraid || msclkid || ttclid) medium = 'cpc';
-        else if (fbclid) medium = 'organic_social';
+        if (gclid || gbraid || wbraid || dclid || fbclid || msclkid || ttclid || sccid) medium = 'cpc';
         else medium = inferred.medium;
       }
 
       var occurredAt = touchTime(values && (values.at || values.captured_at), now);
-      var paid = Boolean(gclid || gbraid || wbraid || msclkid || ttclid || isPaidMedium(medium));
+      var paid = Boolean(gclid || gbraid || wbraid || dclid || fbclid || msclkid || ttclid || sccid || isPaidMedium(medium));
       var identifiableFree = !paid && !(source === 'direct' && (medium === 'none' || !medium));
       return {
         landing_url: landing,
@@ -190,9 +195,11 @@ const JS = String.raw`(function(){
         gclid: gclid,
         gbraid: gbraid,
         wbraid: wbraid,
+        dclid: dclid,
         fbclid: fbclid,
         ttclid: ttclid,
         msclkid: msclkid,
+        sccid: sccid,
         fbc: fbc,
         at: new Date(occurredAt).toISOString(),
         _time: occurredAt,
@@ -218,220 +225,216 @@ const JS = String.raw`(function(){
         gclid: params.get('gclid'),
         gbraid: params.get('gbraid'),
         wbraid: params.get('wbraid'),
+        dclid: params.get('dclid'),
         fbclid: params.get('fbclid'),
         ttclid: params.get('ttclid'),
         msclkid: params.get('msclkid'),
+        sccid: params.get('sccid'),
         captured_at: now
       }, now);
     }
 
-    function publicTouch(touch){
-      if (!touch) return null;
-      return {
-        landing_url: attributionUrl(touch.landing_url),
-        referrer: attributionUrl(touch.referrer),
-        source: attributionText(touch.source, 100).toLowerCase(),
-        medium: normalizedMedium(touch.medium),
-        campaign: attributionText(touch.campaign, 200),
-        content: attributionText(touch.content, 200),
-        term: attributionText(touch.term, 200),
-        gclid: safeClickId(touch.gclid),
-        gbraid: safeClickId(touch.gbraid),
-        wbraid: safeClickId(touch.wbraid),
-        fbclid: safeClickId(touch.fbclid),
-        ttclid: safeClickId(touch.ttclid),
-        msclkid: safeClickId(touch.msclkid),
-        fbc: safeFacebookCookie(touch.fbc, 'fbc'),
-        at: new Date(touchTime(touch.at, Date.now())).toISOString()
-      };
+    function clickValue(value, key){
+      var direct = value && safeClickId(value[key]);
+      if (direct) return direct;
+      return value && value.clickIds && safeClickId(value.clickIds[key]);
     }
 
-    function normalizedTouch(touch, now){
-      if (!touch || typeof touch !== 'object') return null;
-      var clean = touchFromValues(touch, now);
-      if (!clean.landing_url && !clean.referrer && clean.source === 'direct') return null;
-      return clean;
+    function firstValidTime(values, fallback){
+      for (var i = 0; i < values.length; i++) {
+        var parsed = touchTime(values[i], 0);
+        if (parsed) return parsed;
+      }
+      return fallback || 0;
     }
 
-    function emptyAttributionState(){
-      return { version: 1, expiresAt: 0, firstEntry: null, firstFree: null, lastPaid: null };
+    function storedTouch(value, parent, now){
+      if (!value || typeof value !== 'object' || !Object.keys(value).length) return null;
+      var occurredAt = firstValidTime([
+        value.capturedAt, value.captured_at, value.at,
+        parent && parent.capturedAt, parent && parent.captured_at, parent && parent.at
+      ], 0);
+      var touch = touchFromValues({
+        landing_url: value.landingUrl || value.landing_url || value.landing ||
+          (parent && (parent.landingUrl || parent.landing_url || parent.landing)),
+        referrer: value.referrer || (parent && parent.referrer),
+        source: value.source || value.utm_source,
+        medium: value.medium || value.utm_medium,
+        campaign: value.campaign || value.utm_campaign,
+        content: value.content || value.utm_content,
+        term: value.term || value.utm_term,
+        gclid: clickValue(value, 'gclid'),
+        gbraid: clickValue(value, 'gbraid'),
+        wbraid: clickValue(value, 'wbraid'),
+        dclid: clickValue(value, 'dclid'),
+        fbclid: clickValue(value, 'fbclid'),
+        ttclid: clickValue(value, 'ttclid'),
+        msclkid: clickValue(value, 'msclkid'),
+        sccid: clickValue(value, 'sccid'),
+        fbc: value.fbc,
+        captured_at: occurredAt || now
+      }, occurredAt || now, false);
+      if (touch) touch._eventId = safeClickId(value.eventId);
+      return touch;
     }
 
-    function normalizedState(candidate, now){
-      if (!candidate || typeof candidate !== 'object') return null;
-      var expiresAt = Number(candidate.expiresAt || candidate.expires_at || 0);
-      if (!Number.isFinite(expiresAt) || expiresAt <= now) return null;
-      var state = emptyAttributionState();
-      state.expiresAt = expiresAt;
-      state.firstEntry = normalizedTouch(candidate.firstEntry, now);
-      state.firstFree = normalizedTouch(candidate.firstFree, now);
-      state.lastPaid = normalizedTouch(candidate.lastPaid, now);
-      if (state.firstFree && (!state.firstFree._free || state.firstFree._paid)) state.firstFree = null;
-      if (state.lastPaid && !state.lastPaid._paid) state.lastPaid = null;
-      return state;
-    }
-
-    function earlierTouch(left, right){
-      if (!left) return right || null;
-      if (!right) return left;
-      return left._time <= right._time ? left : right;
-    }
-
-    function laterTouch(left, right){
-      if (!left) return right || null;
-      if (!right) return left;
-      return left._time >= right._time ? left : right;
-    }
-
-    function mergeAttributionStates(left, right, now){
-      var a = normalizedState(left, now);
-      var b = normalizedState(right, now);
-      if (!a) return b;
-      if (!b) return a;
-      return {
-        version: 1,
-        expiresAt: Math.max(a.expiresAt, b.expiresAt),
-        firstEntry: earlierTouch(a.firstEntry, b.firstEntry),
-        firstFree: earlierTouch(a.firstFree, b.firstFree),
-        lastPaid: laterTouch(a.lastPaid, b.lastPaid)
-      };
-    }
-
-    function readAttributionState(now){
+    function readCanonicalAttribution(now){
       try {
-        var raw = localStorage.getItem(attributionStorageKey);
-        if (!raw) return null;
-        var state = normalizedState(JSON.parse(raw), now);
-        if (!state) localStorage.removeItem(attributionStorageKey);
-        return state;
-      } catch (_) { return null; }
-    }
-
-    function writeAttributionState(state){
-      try {
-        localStorage.setItem(attributionStorageKey, JSON.stringify({
+        var value = JSON.parse(localStorage.getItem(canonicalAttributionKey) || 'null');
+        if (!value || Number(value.schemaVersion) !== 3) return null;
+        var paid = value.lastPaid && typeof value.lastPaid === 'object' ? value.lastPaid : null;
+        var capturedAt = paid && Number(paid.capturedAt || 0);
+        var hasDatedStoredPaid = Boolean(paid && Object.keys(paid).length && capturedAt > 0);
+        var startedAt = Number(value.startedAt || 0);
+        var expiresAt = Number(value.expiresAt || 0);
+        var storedPaid = paid && storedTouch(paid, value, capturedAt || now);
+        var activePaid = storedPaid && storedPaid._paid && capturedAt > 0 && expiresAt > now ? storedPaid : null;
+        var activeDirectJourney = !hasDatedStoredPaid && Number.isFinite(startedAt) &&
+          startedAt > 0 && startedAt + attributionTtlMs > now;
+        if (!activePaid && !activeDirectJourney) return null;
+        var firstFree = storedTouch(value.firstFree, value, now);
+        if (firstFree && (!firstFree._free || firstFree._paid)) firstFree = null;
+        return {
           version: 1,
-          expiresAt: state.expiresAt,
-          firstEntry: publicTouch(state.firstEntry),
-          firstFree: publicTouch(state.firstFree),
-          lastPaid: publicTouch(state.lastPaid)
-        }));
-      } catch (_) {}
-    }
-
-    function legacyTouch(key, now){
-      try {
-        var raw = localStorage.getItem(key);
-        if (!raw) return null;
-        var value = JSON.parse(raw);
-        var captured = touchTime(value && (value.captured_at || value.at), 0);
-        if (!captured || captured + attributionTtlMs <= now) return null;
-        return touchFromValues(value, captured);
+          journeyId: safeClickId(value.journeyId),
+          expiresAt: activePaid ? expiresAt : 0,
+          firstEntry: storedTouch(value.firstEntry, value, now),
+          firstFree: firstFree,
+          lastPaid: activePaid
+        };
       } catch (_) { return null; }
     }
 
-    function mergeLegacyState(state, now){
-      var next = state || emptyAttributionState();
-      var legacyPrimary = legacyTouch('pmp_paid_attribution_v3', now);
-      var legacyFallback = legacyTouch('pmp_last_touch_v1', now);
-      if (legacyPrimary && legacyPrimary._paid) {
-        next.lastPaid = laterTouch(next.lastPaid, legacyPrimary);
-        next.expiresAt = Math.max(next.expiresAt, legacyPrimary._time + attributionTtlMs);
-      } else if (legacyPrimary && legacyPrimary._free) {
-        next.firstFree = earlierTouch(next.firstFree, legacyPrimary);
-        next.expiresAt = Math.max(next.expiresAt, legacyPrimary._time + attributionTtlMs);
-      }
-      // The generic last-touch record was not guaranteed to contain paid data;
-      // it is therefore accepted only as a clearly unpaid fallback.
-      if (legacyFallback && legacyFallback._free) {
-        next.firstFree = earlierTouch(next.firstFree, legacyFallback);
-        next.expiresAt = Math.max(next.expiresAt, legacyFallback._time + attributionTtlMs);
-      }
-      return next;
+    function readLegacyPaidAttribution(now){
+      var latest = null;
+      ['pmp_paid_attribution_v3', 'pmp:attribution:v1'].forEach(function(key){
+        try {
+          var record = JSON.parse(localStorage.getItem(key) || 'null');
+          if (!record || typeof record !== 'object') return;
+          var paid = record.lastPaid && typeof record.lastPaid === 'object' ? record.lastPaid : record;
+          var occurredAt = firstValidTime([
+            paid.capturedAt, paid.captured_at, paid.at,
+            record.capturedAt, record.captured_at, record.at
+          ], 0);
+          if (!occurredAt || occurredAt > now + 5 * 60 * 1000 || occurredAt + attributionTtlMs <= now) return;
+          var touch = storedTouch(paid, record, occurredAt);
+          if (touch && touch._paid && (!latest || touch._time > latest._time)) latest = touch;
+        } catch (_) {}
+      });
+      return latest;
     }
 
-    function touchFingerprint(touch){
-      if (!touch) return '';
-      return [
-        touch.landing_url, touch.referrer, touch.source, touch.medium, touch.campaign,
-        touch.gclid, touch.gbraid, touch.wbraid, touch.fbclid, touch.ttclid, touch.msclkid
-      ].join('|');
-    }
-
-    function readSessionTouch(now){
+    function readPaidJournalAttribution(now){
+      var candidates = [];
       try {
-        var value = JSON.parse(sessionStorage.getItem(attributionSessionKey) || 'null');
-        if (!value || typeof value !== 'object') return null;
-        var capturedAt = Number(value.capturedAt || 0);
-        var touch = normalizedTouch(value.touch, now);
-        if (!touch || !capturedAt) return null;
-        return { touch: touch, capturedAt: capturedAt, fingerprint: attributionText(value.fingerprint, 2500) };
-      } catch (_) { return null; }
-    }
-
-    function writeSessionTouch(touch, now){
-      try {
-        sessionStorage.setItem(attributionSessionKey, JSON.stringify({
-          capturedAt: now,
-          fingerprint: touchFingerprint(touch),
-          touch: publicTouch(touch)
-        }));
-      } catch (_) {}
-    }
-
-    function recordCurrentVisit(state, now){
-      var next = state || emptyAttributionState();
-      var pageTouch = touchFromPage(now);
-      var session = readSessionTouch(now);
-      var sameTouch = session && session.fingerprint === touchFingerprint(pageTouch);
-      var hasAcquisition = pageTouch._paid || pageTouch._free;
-      var sessionFresh = session && session.capturedAt + attributionSessionTtlMs > now;
-      var isNewTouch = !session || (!sameTouch && (hasAcquisition || !sessionFresh));
-
-      // firstEntry is literal: it is the first page this version actually saw.
-      // It is never synthesized from an older mixed-attribution record.
-      if (!next.firstEntry) {
-        next.firstEntry = pageTouch;
-        next.expiresAt = Math.max(next.expiresAt, now + attributionTtlMs);
-      }
-      if (isNewTouch) {
-        currentSessionTouch = pageTouch;
-        writeSessionTouch(pageTouch, now);
-        if (pageTouch._paid) next.lastPaid = laterTouch(next.lastPaid, pageTouch);
-        else if (pageTouch._free) next.firstFree = earlierTouch(next.firstFree, pageTouch);
-        if (pageTouch._paid || pageTouch._free) {
-          next.expiresAt = Math.max(next.expiresAt, now + attributionTtlMs);
+        var length = Number(localStorage.length) || 0;
+        for (var i = 0; i < length; i++) {
+          var key = localStorage.key(i);
+          if (typeof key !== 'string' || key.indexOf(paidJournalPrefix) !== 0) continue;
+          try {
+            var record = JSON.parse(localStorage.getItem(key) || 'null');
+            if (!record || typeof record !== 'object') continue;
+            var paid = record.lastPaid && storedTouch(record.lastPaid, record, now);
+            if (!paid || !paid._paid || !paid._time || paid._time + attributionTtlMs <= now) continue;
+            var firstFree = storedTouch(record.firstFree, record, now);
+            if (firstFree && (!firstFree._free || firstFree._paid)) firstFree = null;
+            var candidate = {
+              version: 1,
+              contextPending: record.contextPending === true,
+              journeyId: safeClickId(record.journeyId),
+              startedAt: firstValidTime([record.startedAt], 0),
+              expiresAt: paid._time + attributionTtlMs,
+              firstEntry: storedTouch(record.firstEntry, record, now),
+              firstFree: firstFree,
+              lastPaid: paid
+            };
+            candidates.push(candidate);
+          } catch (_) {}
         }
-      } else {
-        currentSessionTouch = session ? session.touch : pageTouch;
+      } catch (_) {}
+      candidates.sort(function(left, right){
+        if (paidTouchIsNewer(left.lastPaid, right.lastPaid)) return -1;
+        if (paidTouchIsNewer(right.lastPaid, left.lastPaid)) return 1;
+        return 0;
+      });
+      var latest = candidates[0] || null;
+      if (latest && latest.contextPending) {
+        var prior = candidates.slice(1).find(function(candidate){
+          return !candidate.contextPending && Boolean(candidate.journeyId);
+        });
+        if (prior) latest = Object.assign({}, latest, {
+          journeyId: prior.journeyId,
+          startedAt: prior.startedAt,
+          firstEntry: prior.firstEntry,
+          firstFree: prior.firstFree
+        });
       }
-      return next;
+      return latest;
     }
 
-    function refreshAttributionState(recordVisit){
-      if (!trackingAllowed()) {
-        attributionState = null;
-        currentSessionTouch = null;
-        return null;
-      }
-      var now = Date.now();
-      var memory = normalizedState(attributionState, now);
-      var stored = readAttributionState(now);
-      attributionState = mergeAttributionStates(memory, stored, now);
-      attributionState = mergeLegacyState(attributionState, now);
-      if (recordVisit || !attributionState || !attributionState.firstEntry) {
-        attributionState = recordCurrentVisit(attributionState, now);
-      }
-      attributionState.expiresAt = Math.max(Number(attributionState.expiresAt || 0), now + 1);
-      writeAttributionState(attributionState);
-      attributionInitialized = true;
-      return attributionState;
+    function paidTouchFromBody(body, now){
+      var occurredAt = firstValidTime([
+        body.last_touch_at, body.last_paid_at, body.captured_at
+      ], 0);
+      if (!occurredAt || occurredAt > now + 5 * 60 * 1000 || occurredAt + attributionTtlMs <= now) return null;
+      var touch = touchFromValues({
+        landing_url: body.last_touch_landing_url || body.last_paid_landing_url || body.landing_url,
+        referrer: body.last_touch_referrer || body.last_paid_referrer || body.referrer,
+        source: body.last_touch_source || body.last_paid_source || body.utm_source,
+        medium: body.last_touch_medium || body.last_paid_medium || body.utm_medium,
+        campaign: body.last_touch_campaign || body.last_paid_campaign || body.utm_campaign,
+        content: body.last_touch_content || body.last_paid_content || body.utm_content,
+        term: body.last_touch_term || body.last_paid_term || body.utm_term,
+        gclid: body.gclid || body.last_touch_gclid || body.last_paid_gclid,
+        gbraid: body.gbraid || body.last_touch_gbraid || body.last_paid_gbraid,
+        wbraid: body.wbraid || body.last_touch_wbraid || body.last_paid_wbraid,
+        dclid: body.dclid || body.last_touch_dclid || body.last_paid_dclid,
+        fbclid: body.fbclid || body.last_touch_fbclid || body.last_paid_fbclid,
+        ttclid: body.ttclid || body.last_touch_ttclid || body.last_paid_ttclid,
+        msclkid: body.msclkid || body.last_touch_msclkid || body.last_paid_msclkid,
+        sccid: body.sccid || body.last_touch_sccid || body.last_paid_sccid,
+        fbc: body.fbc,
+        captured_at: occurredAt
+      }, occurredAt, false);
+      return touch && touch._paid ? touch : null;
+    }
+
+    function latestPaidTouch(candidates){
+      return candidates.filter(Boolean).reduce(function(latest, touch){
+        if (!latest || touch._time > latest._time) return touch;
+        if (touch._time === latest._time && (touch._eventId || '') > (latest._eventId || '')) return touch;
+        return latest;
+      }, null);
+    }
+
+    function earliestTouch(candidates){
+      return candidates.filter(Boolean).reduce(function(earliest, touch){
+        return !earliest || touch._time < earliest._time ? touch : earliest;
+      }, null);
+    }
+
+    function paidTouchIsNewer(left, right){
+      if (!left) return false;
+      if (!right) return true;
+      if (left._time !== right._time) return left._time > right._time;
+      return (left._eventId || '') > (right._eventId || '');
+    }
+
+    function mergedContextState(state, journalState){
+      if (!state) return journalState;
+      if (!journalState) return state;
+      var chosen = paidTouchIsNewer(journalState.lastPaid, state.lastPaid) ? journalState : state;
+      if (!state.journeyId || state.journeyId !== journalState.journeyId) return chosen;
+      return Object.assign({}, chosen, {
+        firstEntry: earliestTouch([state.firstEntry, journalState.firstEntry]),
+        firstFree: earliestTouch([state.firstFree, journalState.firstFree])
+      });
     }
 
     var sensitiveTrackingKeys = [
-      'attribution_model', 'landing_url', 'referrer',
+      'attribution_model', 'journey_id', 'landing_url', 'referrer',
       'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
-      'gclid', 'gbraid', 'wbraid', 'fbclid', 'ttclid', 'msclkid',
+      'gclid', 'gbraid', 'wbraid', 'dclid', 'fbclid', 'ttclid', 'msclkid', 'sccid',
       'fbp', 'fbc', 'external_id', 'ga_client_id', 'ga_session_id', 'ga_session_number'
     ];
 
@@ -445,7 +448,7 @@ const JS = String.raw`(function(){
     }
 
     function sanitizeBodyIdentifiers(body){
-      ['gclid', 'gbraid', 'wbraid', 'fbclid', 'ttclid', 'msclkid'].forEach(function(key){
+      ['gclid', 'gbraid', 'wbraid', 'dclid', 'fbclid', 'ttclid', 'msclkid', 'sccid'].forEach(function(key){
         var clean = safeClickId(body[key]);
         if (clean) body[key] = clean;
         else delete body[key];
@@ -472,30 +475,10 @@ const JS = String.raw`(function(){
       });
     }
 
-    function bodyTouch(body, now){
-      return touchFromValues({
-        landing_url: body.landing_url || location.href,
-        referrer: body.referrer || '',
-        utm_source: body.utm_source,
-        utm_medium: body.utm_medium,
-        utm_campaign: body.utm_campaign,
-        utm_content: body.utm_content,
-        utm_term: body.utm_term,
-        gclid: body.gclid,
-        gbraid: body.gbraid,
-        wbraid: body.wbraid,
-        fbclid: body.fbclid,
-        ttclid: body.ttclid,
-        msclkid: body.msclkid,
-        fbc: body.fbc,
-        captured_at: now
-      }, now);
-    }
-
     function clearTouchFields(body, prefix){
       [
         'landing_url', 'referrer', 'source', 'medium', 'campaign', 'content', 'term', 'at',
-        'gclid', 'gbraid', 'wbraid', 'fbclid', 'ttclid', 'msclkid', 'fbc'
+        'gclid', 'gbraid', 'wbraid', 'dclid', 'fbclid', 'ttclid', 'msclkid', 'sccid', 'fbc'
       ].forEach(function(field){
         delete body[prefix + '_' + field];
       });
@@ -515,9 +498,10 @@ const JS = String.raw`(function(){
     function paidPlatform(touch){
       if (!touch) return '';
       var source = attributionText(touch.source, 100).toLowerCase();
-      if (touch.gclid || touch.gbraid || touch.wbraid || /google/.test(source)) return 'google';
+      if (touch.gclid || touch.gbraid || touch.wbraid || touch.dclid || /google/.test(source)) return 'google';
       if (touch.msclkid || /microsoft|bing/.test(source)) return 'microsoft';
       if (touch.ttclid || /tiktok/.test(source)) return 'tiktok';
+      if (touch.sccid || /snapchat|\bsnap\b/.test(source)) return 'snapchat';
       if (touch.fbclid || touch.fbc || /meta|facebook|instagram|\bfb\b|\big\b/.test(source)) return 'meta';
       return '';
     }
@@ -536,39 +520,43 @@ const JS = String.raw`(function(){
       }
 
       sanitizeBodyIdentifiers(body);
+      var now = Date.now();
+      var suppliedPaid = paidTouchFromBody(body, now);
+      // journey_id is accepted only from the canonical Custom Pixel record.
+      // A stale or forged value supplied by another theme script must not pass.
+      delete body.journey_id;
       Object.keys(body).forEach(function(key){
         if (/^first_free_/.test(key) || /^last_paid_/.test(key)) delete body[key];
       });
-      var now = Date.now();
-      var state = refreshAttributionState(!attributionInitialized);
-      var supplied = bodyTouch(body, now);
+      // Never run the retired v1 writer here. The Custom Pixel owns capture;
+      // this bridge performs only read-only fallbacks during the phased rollout.
+      var state = readCanonicalAttribution(now);
+      var journalState = readPaidJournalAttribution(now);
+      var pageTouch = touchFromPage(pageObservedAt);
+      var pagePaid = pageTouch && pageTouch._paid && pageTouch._time + attributionTtlMs > now ? pageTouch : null;
+      var legacyPaid = readLegacyPaidAttribution(now);
+      var storedPaid = latestPaidTouch([state && state.lastPaid, journalState && journalState.lastPaid, legacyPaid]);
+      var contextState = mergedContextState(state, journalState);
+      var paid = latestPaidTouch([storedPaid, pagePaid]) || suppliedPaid;
       sanitizeBodyAttributionText(body);
-      // A valid paid signal already captured by the theme can seed last-paid
-      // only when this version has not observed a paid touch itself.
-      if (state && !state.lastPaid && supplied._paid) {
-        state.lastPaid = supplied;
-        state.expiresAt = Math.max(state.expiresAt, now + attributionTtlMs);
-        attributionState = state;
-        writeAttributionState(state);
-      }
 
       body.attribution_model = attributionModel;
-      injectTouchFields(body, 'first_entry', state && state.firstEntry);
-      injectTouchFields(body, 'first_touch', state && state.firstFree);
-      injectTouchFields(body, 'last_touch', state && state.lastPaid);
+      if (contextState && contextState.journeyId) body.journey_id = contextState.journeyId;
+      injectTouchFields(body, 'first_entry', contextState && contextState.firstEntry);
+      injectTouchFields(body, 'first_touch', contextState && contextState.firstFree);
+      injectTouchFields(body, 'last_touch', paid);
 
-      var sessionTouch = currentSessionTouch || touchFromPage(now);
+      var sessionTouch = pageTouch;
       body.landing_url = sessionTouch.landing_url || attributionUrl(location.href);
       body.referrer = sessionTouch.referrer || '';
 
       var existingFbc = safeFacebookCookie(body.fbc, 'fbc');
       var existingFbp = safeFacebookCookie(body.fbp, 'fbp');
-      ['gclid', 'gbraid', 'wbraid', 'fbclid', 'ttclid', 'msclkid'].forEach(function(key){ delete body[key]; });
+      ['gclid', 'gbraid', 'wbraid', 'dclid', 'fbclid', 'ttclid', 'msclkid', 'sccid'].forEach(function(key){ delete body[key]; });
       delete body.fbc;
-      var paid = state && state.lastPaid;
       var platform = paidPlatform(paid);
       if (paid) {
-        ['gclid', 'gbraid', 'wbraid', 'fbclid', 'ttclid', 'msclkid'].forEach(function(key){
+        ['gclid', 'gbraid', 'wbraid', 'dclid', 'fbclid', 'ttclid', 'msclkid', 'sccid'].forEach(function(key){
           var clean = safeClickId(paid[key]);
           if (clean) body[key] = clean;
         });
@@ -577,22 +565,13 @@ const JS = String.raw`(function(){
             derivedFbc(paid.fbclid, paid) || existingFbc;
           if (paidFbc) body.fbc = paidFbc;
         }
-      } else {
-        // A bare Meta redirect remains an unpaid/free touch, but retaining its
-        // valid click cookie still improves server-side event matching.
-        var unpaidMeta = supplied.fbclid ? supplied :
-          (state && state.firstFree && state.firstFree.fbclid ? state.firstFree : null);
-        if (unpaidMeta) {
-          body.fbclid = unpaidMeta.fbclid;
-          body.fbc = unpaidMeta.fbc || derivedFbc(unpaidMeta.fbclid, unpaidMeta);
-        }
       }
       if (existingFbp) body.fbp = existingFbp;
     }
 
-    // Capture the first observable page as soon as the ScriptTag loads, but do
-    // not touch nonessential storage until Shopify says tracking is allowed.
-    refreshAttributionState(true);
+    // Deliberately no attribution initialization or write: pmp:attribution:v1
+    // and pmp_paid_attribution_v3 are read-only rollout fallbacks. The Custom
+    // Pixel is the sole owner of capture and migration.
 
     function cleanEventValue(value, fallback, maxLength){
       var clean = String(value == null ? '' : value).trim();
