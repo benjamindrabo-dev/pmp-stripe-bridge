@@ -148,8 +148,10 @@ Events configuration belongs to the shop rather than to a theme.
    record that changed while it was off.
 
 Remaining limits are browser/device continuity, storage clearing/private mode,
-Shopify privacy enforcement, the theme-section dependency of the temporary
-fallback, and the manual Shopify Admin installation step. Repository
+the theme-section dependency of the temporary fallback, and the manual Shopify
+Admin installation step. First-party order attribution is not discarded when
+`Shopify.customerPrivacy.userCanBeTracked()` is false; the Customer Events
+privacy configuration governs execution of the Custom Pixel itself. Repository
 code cannot inspect the shop's configured app pixels/app embeds or connect a
 Custom Pixel without authenticated Admin access; audit those panels and browser
 storage/network listeners separately before retiring an unknown writer.
