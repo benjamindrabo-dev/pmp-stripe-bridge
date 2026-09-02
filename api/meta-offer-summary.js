@@ -28,13 +28,6 @@ const JS = String.raw`(function(){
     var minimumAttributionDate = Date.UTC(2020, 0, 1);
     var pageObservedAt = Date.now();
 
-    function trackingAllowed(){
-      var privacy = window.Shopify && window.Shopify.customerPrivacy;
-      if (!privacy || typeof privacy.userCanBeTracked !== 'function') return true;
-      try { return privacy.userCanBeTracked() === true; }
-      catch (_) { return false; }
-    }
-
     function plainAttributionText(value, maxLength){
       var clean = String(value == null ? '' : value).trim();
       return clean.slice(0, maxLength || 250);
@@ -829,7 +822,6 @@ const JS = String.raw`(function(){
     }
 
     function initializeAttributionFallback(){
-      if (!trackingAllowed()) return;
       var now = Date.now();
       try {
         var state = migrateAttributionState(now);
@@ -866,22 +858,6 @@ const JS = String.raw`(function(){
           state.lastPaid.capturedAt + attributionTtlMs : 0;
         localStorage.setItem(canonicalAttributionKey, JSON.stringify(state));
       } catch (_) {}
-    }
-
-    var sensitiveTrackingKeys = [
-      'attribution_model', 'journey_id', 'landing_url', 'referrer',
-      'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term',
-      'gclid', 'gbraid', 'wbraid', 'dclid', 'fbclid', 'ttclid', 'msclkid', 'sccid',
-      'fbp', 'fbc', 'external_id', 'ga_client_id', 'ga_session_id', 'ga_session_number'
-    ];
-
-    function removeTrackingBody(body){
-      Object.keys(body || {}).forEach(function(key){
-        if (sensitiveTrackingKeys.indexOf(key) !== -1 ||
-          /^first_(entry|touch|free)_/.test(key) || /^last_(touch|paid)_/.test(key)) {
-          delete body[key];
-        }
-      });
     }
 
     function sanitizeBodyIdentifiers(body){
@@ -951,11 +927,6 @@ const JS = String.raw`(function(){
     }
 
     function injectAttribution(body){
-      if (!trackingAllowed()) {
-        removeTrackingBody(body);
-        return;
-      }
-
       sanitizeBodyIdentifiers(body);
       var now = Date.now();
       var suppliedPaid = paidTouchFromBody(body, now);
@@ -1006,9 +977,9 @@ const JS = String.raw`(function(){
       if (existingFbp) body.fbp = existingFbp;
     }
 
-    // Run once per document behind __pmpCheckoutCountryBridge. This introduces
-    // no popup and performs no storage access when Shopify explicitly reports
-    // that tracking is unavailable.
+    // Run once per document behind __pmpCheckoutCountryBridge. This first-party
+    // order attribution must remain available in every Shopify market. The
+    // Customer Events privacy setting controls the Custom Pixel separately.
     initializeAttributionFallback();
 
     function cleanEventValue(value, fallback, maxLength){
