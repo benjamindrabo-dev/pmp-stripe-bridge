@@ -681,7 +681,7 @@ test("checkout bridge rejects expired canonical attribution and a forged journey
   assert.notEqual(requests[0].journey_id, "journey-expired-123456");
 });
 
-test("denied Shopify consent avoids storage and removes every attribution identifier", async () => {
+test("Shopify privacy denial does not erase first-party order attribution", async () => {
   const now = Date.UTC(2026, 8, 1);
   const accesses = [];
   const requests = [];
@@ -719,12 +719,42 @@ test("denied Shopify consent avoids storage and removes every attribution identi
     last_paid_source: "google",
   });
 
-  assert.deepEqual(accesses, []);
-  for (const key of [
-    "journey_id", "attribution_model", "landing_url", "utm_source", "gclid",
-    "fbp", "fbc", "external_id", "ga_client_id", "first_touch_source", "last_paid_source",
-  ]) assert.equal(key in requests[0], false, key);
+  assert.ok(accesses.some(([operation, key]) => operation === "get" && key === "pmp:attribution"));
+  assert.ok(accesses.some(([operation, key]) => operation === "set" && key === "pmp:attribution"));
+  assert.equal(requests[0].journey_id, "journey-private-123456");
+  assert.equal(requests[0].attribution_model, "last_paid_else_first_free_v1");
+  assert.equal(requests[0].gclid, "PRIVATE_GCLID_123456");
+  assert.equal(requests[0].landing_url, "https://puremajestypet.com/products/cranberry");
+  assert.notEqual(requests[0].journey_id, "forged-journey-123456");
+  assert.notEqual(requests[0].gclid, "BODY_GCLID_123456");
 });
+
+for (const marketPath of ["/en-gb/", "/de-de/", "/es-es/"]) {
+  test(`privacy denial still captures paid attribution on ${marketPath}`, async () => {
+    const now = Date.UTC(2026, 8, 2);
+    const localMap = new Map();
+    const requests = [];
+    const storefront = storefrontHarness(async (_input, init) => {
+      requests.push(JSON.parse(init.body));
+      return new FakeResponse({});
+    }, {
+      localMap,
+      clock: { now },
+      href: `https://puremajestypet.com${marketPath}products/collagen?gclid=MARKET_GCLID_123456`,
+      referrer: "https://www.google.com/",
+      customerPrivacy: { userCanBeTracked: () => false },
+      crypto: { randomUUID: () => "00000000-0000-4000-8000-000000000999" },
+    });
+
+    const stored = JSON.parse(localMap.get("pmp:attribution"));
+    assert.equal(stored.lastPaid.clickIds.gclid, "MARKET_GCLID_123456");
+    assert.equal(stored.lastPaid.landingUrl, `https://puremajestypet.com${marketPath}products/collagen`);
+
+    await checkoutBody(storefront, { items: [] });
+    assert.equal(requests[0].journey_id, stored.journeyId);
+    assert.equal(requests[0].gclid, "MARKET_GCLID_123456");
+  });
+}
 
 test("fallback keeps one paid click through direct, email, organic, and referral visits without renewing it", () => {
   const started = Date.UTC(2026, 8, 1);
