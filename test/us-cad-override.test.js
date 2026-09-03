@@ -2,14 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  DEFAULT_US_CAD_OVERRIDE_UNTIL,
   convertLinePricesByCatalog,
   normalizeCountry,
   shouldApplyUsCadOverride,
 } from "../lib/us-cad-override.js";
-
-const BEFORE_DEADLINE = Date.parse("2026-09-03T00:29:59.999Z");
-const AT_DEADLINE = Date.parse(DEFAULT_US_CAD_OVERRIDE_UNTIL);
 
 test("normalizes a two-letter country and rejects invalid values", () => {
   assert.equal(normalizeCountry(" us "), "US");
@@ -17,36 +13,36 @@ test("normalizes a two-letter country and rejects invalid values", () => {
   assert.equal(normalizeCountry(null), null);
 });
 
-test("applies only to US checkouts displayed in USD before the deadline", () => {
+test("remains active for US checkouts displayed in USD until manually disabled", () => {
   assert.equal(shouldApplyUsCadOverride({
     displayCurrency: "usd",
     checkoutCountry: "US",
-    now: BEFORE_DEADLINE,
+    now: Date.parse("2099-01-01T00:00:00.000Z"),
   }), true);
 
   assert.equal(shouldApplyUsCadOverride({
     displayCurrency: "USD",
     checkoutCountry: null,
-    now: BEFORE_DEADLINE,
   }), false);
 
   assert.equal(shouldApplyUsCadOverride({
     displayCurrency: "USD",
     checkoutCountry: "CA",
-    now: BEFORE_DEADLINE,
   }), false);
 
   assert.equal(shouldApplyUsCadOverride({
     displayCurrency: "CAD",
     checkoutCountry: "US",
-    now: BEFORE_DEADLINE,
   }), false);
+});
 
+test("cannot expire automatically from legacy deadline inputs", () => {
   assert.equal(shouldApplyUsCadOverride({
     displayCurrency: "USD",
     checkoutCountry: "US",
-    now: AT_DEADLINE,
-  }), false);
+    now: Date.parse("2099-01-01T00:00:00.000Z"),
+    until: "2000-01-01T00:00:00.000Z",
+  }), true);
 });
 
 test("uses Shopify market-price ratios and preserves free gift lines", () => {
