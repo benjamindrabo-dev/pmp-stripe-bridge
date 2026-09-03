@@ -28,7 +28,6 @@ function installEnvironment(t) {
     "UPSTASH_REDIS_REST_URL",
     "UPSTASH_REDIS_REST_TOKEN",
     "SUCCESS_URL",
-    "TEMP_US_CAD_UNTIL",
     "OMNISEND_API_KEY",
     "BRIDGE_PUBLIC_URL",
   ];
@@ -41,8 +40,6 @@ function installEnvironment(t) {
     UPSTASH_REDIS_REST_URL: "https://upstash.example",
     UPSTASH_REDIS_REST_TOKEN: "redis-token",
     SUCCESS_URL: "https://shop.example/thank-you",
-    // Keep these tests on the ordinary USD path.
-    TEMP_US_CAD_UNTIL: "2000-01-01T00:00:00.000Z",
     OMNISEND_API_KEY: "",
     BRIDGE_PUBLIC_URL: "https://bridge.example",
   });
