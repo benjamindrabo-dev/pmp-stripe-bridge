@@ -20,7 +20,7 @@ test("production campaign wrapper stays at Stripe's 50-key metadata limit", asyn
   const envNames = [
     "SHOPIFY_STORE_DOMAIN", "SHOPIFY_ADMIN_TOKEN", "STRIPE_SECRET_KEY",
     "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "SUCCESS_URL",
-    "TEMP_US_CAD_UNTIL", "OMNISEND_API_KEY", "BRIDGE_PUBLIC_URL",
+    "OMNISEND_API_KEY", "BRIDGE_PUBLIC_URL",
   ];
   const originalEnv = Object.fromEntries(envNames.map((name) => [name, process.env[name]]));
   Object.assign(process.env, {
@@ -30,7 +30,6 @@ test("production campaign wrapper stays at Stripe's 50-key metadata limit", asyn
     UPSTASH_REDIS_REST_URL: "https://upstash.example",
     UPSTASH_REDIS_REST_TOKEN: "redis-token",
     SUCCESS_URL: "https://shop.example/thank-you",
-    TEMP_US_CAD_UNTIL: "2000-01-01T00:00:00.000Z",
     OMNISEND_API_KEY: "",
     BRIDGE_PUBLIC_URL: "https://bridge.example",
   });
