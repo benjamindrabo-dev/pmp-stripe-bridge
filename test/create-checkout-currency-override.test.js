@@ -38,7 +38,8 @@ function installEnvironment(t) {
     UPSTASH_REDIS_REST_URL: "https://upstash.example",
     UPSTASH_REDIS_REST_TOKEN: "redis-token",
     SUCCESS_URL: "https://shop.example/thank-you",
-    TEMP_US_CAD_UNTIL: "2099-01-01T00:00:00.000Z",
+    // A stale production value must never disable the manual-removal rule.
+    TEMP_US_CAD_UNTIL: "2000-01-01T00:00:00.000Z",
   });
 
   t.after(() => {
