@@ -4,6 +4,7 @@
 export const config = { api: { bodyParser: false } };
 
 import crypto from "crypto";
+import { usdEmailAttributes } from "../lib/usd-email.js";
 
 const SHOPIFY_API = "2026-01"; // keep on a SUPPORTED version (2025-01 expired; expired versions silently fall forward)
 
@@ -1053,6 +1054,7 @@ export async function createShopifyOrder({ items, currency, email, phone, shippi
   const charged = Number(chargedCents);
   if (!Number.isInteger(charged) || charged < 0) throw new Error("Invalid signed Stripe amount");
   const noteAttributes = sessionId ? [{ name: "stripe_session_id", value: String(sessionId) }] : [];
+  noteAttributes.push(...usdEmailAttributes({ cart: attribution, items, currency, chargedCents, discount }));
   const bridgeCorrelation = {
     pmp_journey_id: attribution && attribution.journey_id,
     shopify_cart_token: attribution && attribution.shopify_cart_token,
