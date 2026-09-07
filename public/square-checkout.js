@@ -32,6 +32,7 @@ async function submit(tokenizer){
   $('status').textContent=t.pending;setBusy(false);
  }catch(e){$('status').className='error';$('status').textContent=e.message;setBusy(false);}
 }
+$('email').addEventListener('blur',()=>{if($('email').value&&$('email').checkValidity())json('/api/square-checkout',{action:'contact',sessionId,email:$('email').value}).catch(()=>{});});
 $('same').addEventListener('change',()=>{$('billing').hidden=$('same').checked;for(const id of ['bcountry','baddress','bcity'])$(id).required=!$('same').checked;});
 $('apply').addEventListener('click',async()=>{if(busy)return;$('apply').disabled=true;try{const next=await json('/api/square-checkout',{sessionId,promotionCode:$('promo').value,email:$('email').value});location.assign(next.checkoutUrl);}catch(e){$('promo-status').textContent=e.message;$('apply').disabled=false;}});
 try{
