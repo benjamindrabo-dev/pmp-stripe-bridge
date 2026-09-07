@@ -67,7 +67,7 @@ try{
  $('charge').textContent=t.charge.replace('{cad}',(data.quote.chargeMinor/100).toFixed(2));$('back').href=data.returnUrl.replace('/pages/thank-you','/cart');
  const script=document.createElement('script');script.src=data.environment==='production'?'https://web.squarecdn.com/v1/square.js':'https://sandbox.web.squarecdn.com/v1/square.js';await new Promise((resolve,reject)=>{script.onload=resolve;script.onerror=()=>reject(Error('Secure payment could not load. Please refresh.'));document.head.append(script);});
  payments=Square.payments(data.applicationId,data.locationId);try{await payments.setLocale(data.locale||'en');}catch{}
- card=await payments.card();await card.attach('#card');restoreDraft();setBusy(false);showSuggestions();
+ card=await payments.card({style:{'.input-container':{borderColor:'#dedede',borderRadius:'10px'},'.input-container.is-focus':{borderColor:'#4595c5'},input:{fontSize:'16px',color:'#111111',backgroundColor:'#ffffff'},'input::placeholder':{color:'#777777'}}});await card.attach('#card');restoreDraft();setBusy(false);showSuggestions();
  $('checkout-form').addEventListener('submit',e=>{e.preventDefault();if(selectedMethod==='card')submit(v=>card.tokenize(v));else if(walletMethods[selectedMethod])submit(()=>walletMethods[selectedMethod].tokenize(),selectedMethod);});
  document.querySelectorAll('[name="payment-method"]').forEach(r=>r.addEventListener('change',()=>{if(busy)return;selectedMethod=r.value;document.querySelectorAll('.method-row').forEach(row=>row.classList.toggle('selected',row.contains(r)));$('card-panel').hidden=selectedMethod!=='card';}));
  // Initialize wallets independently, in visible containers.
