@@ -8,7 +8,7 @@ export default async function handler(req,res){
      try{if(!validId(req.body.sessionId))return res.status(400).json({error:'Invalid checkout'});
        const pending=await get('square:attempt:'+req.body.sessionId);if(pending&&!pending.failed)return res.status(409).json({error:'A payment is already being confirmed for this checkout.'});
        const cart=await get('sess:'+req.body.sessionId);if(!cart)return res.status(410).json({error:'Checkout expired'});
-       return res.status(200).json(await createSquareQuote({...cart,items:cart.items.map(it=>({...it,price_cents:it.original_price_cents})),promotionCode:req.body.promotionCode||cart.promotionCode}));
+       return res.status(200).json(await createSquareQuote({...cart,email:req.body.email||cart.email,items:cart.items.map(it=>({...it,price_cents:it.original_price_cents})),promotionCode:req.body.promotionCode||cart.promotionCode}));
      }catch(e){return res.status(e.status||503).json({error:e.message});}
    }
    req.squareMode=true;return baseHandler(req,res);

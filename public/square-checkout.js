@@ -33,7 +33,7 @@ async function submit(tokenizer){
  }catch(e){$('status').className='error';$('status').textContent=e.message;setBusy(false);}
 }
 $('same').addEventListener('change',()=>{$('billing').hidden=$('same').checked;for(const id of ['bcountry','baddress','bcity'])$(id).required=!$('same').checked;});
-$('apply').addEventListener('click',async()=>{if(busy)return;$('apply').disabled=true;try{const next=await json('/api/square-checkout',{sessionId,promotionCode:$('promo').value});location.assign(next.checkoutUrl);}catch(e){$('promo-status').textContent=e.message;$('apply').disabled=false;}});
+$('apply').addEventListener('click',async()=>{if(busy)return;$('apply').disabled=true;try{const next=await json('/api/square-checkout',{sessionId,promotionCode:$('promo').value,email:$('email').value});location.assign(next.checkoutUrl);}catch(e){$('promo-status').textContent=e.message;$('apply').disabled=false;}});
 try{
  if(!/^sq_[a-f0-9]{32}$/.test(sessionId||''))throw Error('Invalid checkout link. Please return to the store.');
  data=await json('/api/square-checkout?session_id='+sessionId);
