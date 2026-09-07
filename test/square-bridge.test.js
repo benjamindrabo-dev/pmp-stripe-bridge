@@ -82,3 +82,36 @@ test('captured payment with delayed Shopify creation returns pending, never a re
  assert.deepEqual(h.counts(),{posts:1,orders:1});
  }finally{h.restore();}
 });
+
+test('merchant discount breakdown preserves captured total in both currencies and free gifts',()=>{
+ for(const [currency,scale,original,net,charge,rate,code] of [
+  ['USD',100,3199,2559,7079,0.723026,'WELCOME20'],
+  ['CAD',100,4500,3600,7200,1,'WELCOME20'],
+  ['EUR',100,2999,2699,8305,0.65,'THANK10'],
+  ['JPY',100,450000,360000,7200,100,'WELCOME20'],
+  ['KWD',1000,9990,7992,7104,0.225,'WELCOME20']
+ ]) {
+  const c={...cart,displayCurrency:currency,scale,promotionCode:code,items:[{variant_id:1,quantity:2,original_price_cents:original,price_cents:net},{variant_id:1,quantity:1,original_price_cents:0,price_cents:0}],subtotal:net*2,total:net*2,quote:{...cart.quote,chargeMinor:charge,displayUnitsPerCad:String(rate)}};
+  const o=buildOrder(c,payment,attempt),d=o.discountCode.itemFixedDiscountCode;
+  assert.match(d.code,code==='WELCOME20'?/20% off/:/10% off/);
+  for(const [key,unit,total] of [['shopMoney',100,charge],['presentmentMoney',scale,c.total]]){
+   const gross=o.lineItems.reduce((sum,l)=>sum+Math.round(Number(l.priceSet[key].amount)*unit)*l.quantity,0);
+   assert.equal(gross-Math.round(Number(d.amountSet[key].amount)*unit),total,currency+' exact '+key);
+  }
+  assert.equal(o.lineItems.filter(l=>Number(l.priceSet.presentmentMoney.amount)===0).reduce((n,l)=>n+l.quantity,0),1);
+  assert.equal(o.transactions[0].amountSet.shopMoney.amount,(charge/100).toFixed(2));
+ }
+});
+test('undiscounted and legacy carts do not acquire a discount',()=>{
+ assert.equal(buildOrder(cart,payment,attempt).discountCode,undefined);
+ assert.equal(buildOrder({...cart,promotionCode:'WELCOME20'},payment,attempt).discountCode,undefined);
+});
+test('promotion does not discount shipping',()=>{
+ const c={...cart,promotionCode:'WELCOME20',items:[{variant_id:1,quantity:2,original_price_cents:100,price_cents:80}],subtotal:160,shippingDisplay:40,total:200,quote:{...cart.quote,chargeMinor:267}};
+ const o=buildOrder(c,payment,attempt),d=o.discountCode.itemFixedDiscountCode.amountSet;
+ for(const [key,unit,total] of [['shopMoney',100,267],['presentmentMoney',100,200]]) {
+  const gross=o.lineItems.reduce((n,l)=>n+Math.round(Number(l.priceSet[key].amount)*unit)*l.quantity,0);
+  assert.equal(gross-Math.round(Number(d[key].amount)*unit)+Math.round(Number(o.shippingLines[0].priceSet[key].amount)*unit),total);
+ }
+ assert.equal(o.shippingLines[0].priceSet.presentmentMoney.amount,'0.40');
+});
