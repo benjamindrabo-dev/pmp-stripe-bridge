@@ -40,6 +40,9 @@
     },
     "api/create-checkout.js": {
       "maxDuration": 60
+    },
+    "api/session-status.js": {
+      "maxDuration": 60
     }
   },
   "crons": [

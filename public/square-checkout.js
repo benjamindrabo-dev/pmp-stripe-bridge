@@ -18,7 +18,7 @@ async function json(url,body){const r=await fetch(url,{method:body?'POST':'GET',
 function addr(prefix='') { return {first_name:$('first').value,last_name:$('last').value,address_line_1:$(prefix+'address').value,address_line_2:prefix?'':$('address2').value,locality:$(prefix+'city').value,administrative_district_level_1:$(prefix+'state').value,postal_code:$(prefix+'zip').value,country:prefix?$('bcountry').value.toUpperCase():data.country}; }
 function valid(){return $('checkout-form').reportValidity();}
 function setBusy(value){busy=value;$('pay').disabled=value;$('apply').disabled=value;$('country').disabled=value;document.querySelectorAll('[name="payment-method"]').forEach(r=>r.disabled=value);document.querySelectorAll('[data-cart-edit]').forEach(b=>b.disabled=value);$('pay').textContent=value?t.processing:t.pay+' '+fmt(data.quote.displayAmount);}
-async function poll(){for(let i=0;i<30;i++){const s=await json('/api/session-status?session_id='+sessionId);if(s.paid&&s.orderId){location.assign(s.returnUrl);return true;}await new Promise(r=>setTimeout(r,2000));}return false;}
+async function poll(){for(let i=0;i<150;i++){try{const s=await json('/api/session-status?session_id='+sessionId);if(s.paid&&s.orderId){location.assign(s.returnUrl);return true;}}catch{}await new Promise(r=>setTimeout(r,2000));}return false;}
 async function submit(tokenizer,method='card'){
  if(busy)return;$('cardholder').required=method==='card';if(!valid())return;
  if(Date.now()>=Date.parse(data.quote.expiresAt)){$('status').textContent=t.expired;return;}
@@ -33,7 +33,7 @@ async function submit(tokenizer,method='card'){
   const result=await json('/api/square-pay',{sessionId,sourceId:token.token,verificationToken,email:$('email').value,shipping,billing,confirmedChargeMinor:data.quote.chargeMinor});
   if(result.paid&&result.returnUrl){location.assign(result.returnUrl);return;}
   $('status').textContent=t.pending;if(await poll())return;
-  $('status').textContent=t.pending;setBusy(false);
+  $('status').textContent=t.pending;setTimeout(()=>poll(),2000);
  }catch(e){$('status').className='error';$('status').textContent=e.message;setBusy(false);}
 }
 function extra(){const lang=String(data?.locale||'en').split('-')[0];return ({fr:{title:'Complétez votre commande',add:'Ajouter',remove:'Retirer',updating:'Mise à jour du total…'},de:{title:'Bestellung ergänzen',add:'Hinzufügen',remove:'Entfernen',updating:'Gesamtbetrag wird aktualisiert…'},es:{title:'Completa tu pedido',add:'Añadir',remove:'Quitar',updating:'Actualizando el total…'},it:{title:'Completa il tuo ordine',add:'Aggiungi',remove:'Rimuovi',updating:'Aggiornamento del totale…'},pt:{title:'Complete a sua encomenda',add:'Adicionar',remove:'Remover',updating:'A atualizar o total…'}})[lang]||{title:'Complete your order',add:'Add',remove:'Remove',updating:'Updating your total…'};}

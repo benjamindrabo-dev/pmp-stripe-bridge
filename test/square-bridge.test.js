@@ -44,7 +44,7 @@ function harness({ambiguous=false}={}){
   if(String(url).includes('/v2/payments/'))return result({payment});
   if(String(url).includes('graphql.json')){
    if(body.query.startsWith('query SquareExisting'))return result({data:{orders:{nodes:created?[{id:'gid://shopify/Order/1',legacyResourceId:'1',name:'#TEST'}]:[]}}});
-   if(body.query.startsWith('mutation SquareOrder')){orders++;created=true;if(ambiguous)throw Error('Network dropped');return result({data:{orderCreate:{order:{id:'gid://shopify/Order/1',legacyResourceId:'1',name:'#TEST'},userErrors:[]}}});}
+   if(body.query.startsWith('mutation SquareOrder')){assert.equal(body.variables.order.transactions[0].receiptJson,undefined,'Do not send a serialized receipt string to Shopify');assert.equal(body.variables.options.sendReceipt,true);orders++;created=true;if(ambiguous)throw Error('Network dropped');return result({data:{orderCreate:{order:{id:'gid://shopify/Order/1',legacyResourceId:'1',name:'#TEST'},userErrors:[]}}});}
   }
   throw Error('Unexpected URL '+url);
  };
@@ -70,4 +70,15 @@ test('ambiguous Shopify response retains lease and reconciles without a second o
 });
 test('tampered CAD total cannot cause a charge',async()=>{
  const h=harness();try{await assert.rejects(()=>paySquare(id,{sourceId:'token',email:attempt.email,shipping:address,confirmedChargeMinor:1}));assert.deepEqual(h.counts(),{posts:0,orders:0});}finally{h.restore();}
+});
+
+test('captured payment with delayed Shopify creation returns pending, never a retry-payment error',async()=>{
+ const {default:handler}=await import('../api/square-pay.js');
+ const h=harness({ambiguous:true});try{
+ const req={method:'POST',body:{sessionId:id,sourceId:'wallet-token',email:attempt.email,shipping:address,confirmedChargeMinor:200}};
+ const res={setHeader(){},status(n){this.code=n;return this;},json(v){this.body=v;return this;}};
+ await handler(req,res);
+ assert.equal(res.code,200);assert.deepEqual(res.body,{paid:false,pending:true});
+ assert.deepEqual(h.counts(),{posts:1,orders:1});
+ }finally{h.restore();}
 });
