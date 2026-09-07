@@ -19,6 +19,15 @@ function addr(prefix='') { return {first_name:$('first').value,last_name:$('last
 function valid(){return $('checkout-form').reportValidity();}
 function setBusy(value){busy=value;$('pay').disabled=value;$('apply').disabled=value;$('country').disabled=value;document.querySelectorAll('[name="payment-method"]').forEach(r=>r.disabled=value);document.querySelectorAll('[data-cart-edit]').forEach(b=>b.disabled=value);$('pay').textContent=value?t.processing:t.pay+' '+fmt(data.quote.displayAmount);}
 async function poll(){for(let i=0;i<150;i++){try{const s=await json('/api/session-status?session_id='+sessionId);if(s.paid&&s.orderId){location.assign(s.returnUrl);return true;}}catch{}await new Promise(r=>setTimeout(r,2000));}return false;}
+const trackedStages=new Set();
+function trackStage(stage){
+ const key='pmp:square-stage:'+sessionId+':'+stage;
+ if(trackedStages.has(key))return;
+ try{if(sessionStorage.getItem(key))return;}catch{}
+ trackedStages.add(key);
+ fetch('/api/square-checkout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'progress',sessionId,stage}),keepalive:true}).then(r=>{if(!r.ok)throw Error();try{sessionStorage.setItem(key,'1');}catch{}}).catch(()=>trackedStages.delete(key));
+}
+$('checkout-form').addEventListener('input',e=>{if(['email','first','last','address','city','zip'].includes(e.target.id)&&e.target.value)trackStage('details_started');});
 async function submit(tokenizer,method='card'){
  if(busy)return;$('cardholder').required=method==='card';if(!valid())return;
  if(Date.now()>=Date.parse(data.quote.expiresAt)){$('status').textContent=t.expired;return;}
@@ -29,6 +38,7 @@ async function submit(tokenizer,method='card'){
   const token=await tokenizer(verification);
   if(token.status!=='OK')throw Error(token.errors?.map(e=>e.message).join(' ')||'Payment information could not be verified.');
   if(method==='afterpay'){const a=token.details?.shipping?.contact;if(!a||a.countryCode!==data.country)throw Error('Select the same delivery country in checkout and Afterpay.');shipping={first_name:a.givenName,last_name:a.familyName,address_line_1:a.addressLines?.[0],address_line_2:a.addressLines?.slice(1).join(' '),locality:a.city,administrative_district_level_1:a.state,postal_code:a.postalCode,country:a.countryCode};}
+  trackStage('payment_info_added');
   let verificationToken;if(method==='apple'||method==='google'){const verified=await payments.verifyBuyer(token.token,verification);verificationToken=verified.token;}
   const result=await json('/api/square-pay',{sessionId,sourceId:token.token,verificationToken,email:$('email').value,shipping,billing,confirmedChargeMinor:data.quote.chargeMinor});
   if(result.paid&&result.returnUrl){location.assign(result.returnUrl);return;}
@@ -68,7 +78,9 @@ try{
  $('charge').textContent=t.charge.replace('{cad}',(data.quote.chargeMinor/100).toFixed(2));$('back').href=data.returnUrl.replace('/pages/thank-you','/cart');
  const script=document.createElement('script');script.src=data.environment==='production'?'https://web.squarecdn.com/v1/square.js':'https://sandbox.web.squarecdn.com/v1/square.js';await new Promise((resolve,reject)=>{script.onload=resolve;script.onerror=()=>reject(Error('Secure payment could not load. Please refresh.'));document.head.append(script);});
  payments=Square.payments(data.applicationId,data.locationId);try{await payments.setLocale(data.locale||'en');}catch{}
- card=await payments.card({style:{'.input-container':{borderColor:'#dedede',borderRadius:'10px'},'.input-container.is-focus':{borderColor:'#4595c5'},input:{fontSize:'14px',fontFamily:'Arial, sans-serif',color:'#111111',backgroundColor:'#ffffff'},'input::placeholder':{color:'#777777'}}});await card.attach('#card');restoreDraft();setBusy(false);showSuggestions();
+ card=await payments.card({style:{'.input-container':{borderColor:'#dedede',borderRadius:'10px'},'.input-container.is-focus':{borderColor:'#4595c5'},input:{fontSize:'14px',fontFamily:'Arial, sans-serif',color:'#111111',backgroundColor:'#ffffff'},'input::placeholder':{color:'#777777'}}});await card.attach('#card');
+ for(const event of ['cardBrandChanged','focusClassRemoved','errorClassAdded','errorClassRemoved'])card.addEventListener(event,e=>{if(e.currentState?.isEmpty===false)trackStage('payment_started');});
+ restoreDraft();setBusy(false);showSuggestions();
  $('checkout-form').addEventListener('submit',e=>{e.preventDefault();if(selectedMethod==='card')submit(v=>card.tokenize(v));else if(walletMethods[selectedMethod])submit(()=>walletMethods[selectedMethod].tokenize(),selectedMethod);});
  document.querySelectorAll('[name="payment-method"]').forEach(r=>r.addEventListener('change',()=>{if(busy)return;selectedMethod=r.value;$('cardholder').required=selectedMethod==='card';document.querySelectorAll('.method-row').forEach(row=>row.classList.toggle('selected',row.contains(r)));$('card-panel').hidden=selectedMethod!=='card';}));
  // Initialize wallets independently, in visible containers.

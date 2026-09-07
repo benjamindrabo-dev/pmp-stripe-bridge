@@ -1587,3 +1587,13 @@ export default async function handler(req, res) {
 
 // Shared analytics delivery for verified Square purchases.
 export { ga4PersistIntent, ga4TrySend, metaPersistIntent, metaTrySend };
+
+// Separate stage IDs prevent pre-purchase events from colliding with Purchase.
+export async function metaCheckoutStageIntent(opts, eventName, eventTime) {
+  if (!['CheckoutDetailsStarted','PaymentInfoStarted','AddPaymentInfo'].includes(eventName)) throw new Error('Invalid checkout stage');
+  if (!process.env.META_PIXEL_ID || !process.env.META_CAPI_TOKEN) return null;
+  const body = buildMetaPurchaseBody(opts);
+  body.data[0].event_name = eventName;
+  body.data[0].event_time = Math.floor(eventTime / 1000);
+  return outboxEnqueue('meta', opts.sessionId, body, META_OUTBOX_TTL);
+}

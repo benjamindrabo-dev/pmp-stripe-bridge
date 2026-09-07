@@ -1179,6 +1179,9 @@ const JS = String.raw`(function(){
         if (country) body.checkout_country = country;
         injectAttribution(body);
         body.payment_provider = "square";
+        try { var privacy = window.Shopify && window.Shopify.customerPrivacy;
+          body.marketing_allowed = Boolean(privacy && typeof privacy.marketingAllowed === 'function' && privacy.marketingAllowed());
+        } catch (_) { body.marketing_allowed = false; }
         nextInit.body = JSON.stringify(body);
       } catch (_) {}
 
@@ -1209,7 +1212,7 @@ const JS = String.raw`(function(){
         }).then(function(data){
           if (data && data.provider === 'square' && data.sessionId && data.checkoutUrl) {
             var squareUrl = new URL(data.checkoutUrl);
-            if (squareUrl.origin !== 'https://pmp-stripe-bridge.vercel.app' || squareUrl.pathname !== '/square-checkout.html') throw new Error('Invalid checkout URL');
+            if (!['https://pmp-stripe-bridge.vercel.app','https://checkout.puremajestypet.com'].includes(squareUrl.origin) || squareUrl.pathname !== '/square-checkout.html') throw new Error('Invalid checkout URL');
             beginCheckout(data);
             window.location.assign(squareUrl.href);
             // Stop legacy Stripe mounting while this document navigates away.

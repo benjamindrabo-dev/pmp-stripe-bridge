@@ -2,6 +2,7 @@ import baseHandler from '../lib/create-checkout-base.js';
 import {get,validId,publicQuote,createSquareQuote,captureSquareContact} from '../lib/square-bridge.js';
 export default async function handler(req,res){
  res.setHeader('Cache-Control','no-store');
+ if(req.method==='POST'&&req.body?.action==='progress'){try{const {captureCheckoutStage}=await import('../lib/square-progress.js');return res.status(200).json(await captureCheckoutStage(req.body.sessionId,req.body.stage));}catch(e){return res.status(e.status||503).json({error:'Checkout tracking unavailable'});}}
  if(req.method==='POST'&&req.body?.action==='contact'){try{return res.status(200).json(await captureSquareContact(req.body.sessionId,req.body.email));}catch(e){return res.status(e.status||503).json({error:e.message});}}
  if(req.method==='POST'){
    // A saved quote can be refreshed or have a supported promotion applied.

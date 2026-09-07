@@ -1014,3 +1014,14 @@ test("loading the ScriptTag twice does not double-wrap fetch or checkout analyti
   assert.equal(requests.length, 1);
   assert.equal(storefront.google.filter((event) => event[1] === "begin_checkout").length, 1);
 });
+
+test('Square checkout navigates to branded domain and carries marketing consent', async()=>{
+ let request,redirect;
+ const redirected=new Promise(resolve=>{redirect=resolve;});
+ const payload={...successfulCheckout(),provider:'square',sessionId:'sq_'+'a'.repeat(32),checkoutUrl:'https://checkout.puremajestypet.com/square-checkout.html?session_id=sq_'+'a'.repeat(32)};
+ const storefront=storefrontHarness(async(_url,init)=>{request=JSON.parse(init.body);return new FakeResponse(payload);},{customerPrivacy:{marketingAllowed:()=>true}});
+ storefront.location.assign=url=>redirect(url);
+ void checkoutBody(storefront);
+ const url=await Promise.race([redirected,new Promise((_,reject)=>setTimeout(()=>reject(Error('No checkout navigation')),1000))]);
+ assert.equal(url,payload.checkoutUrl);assert.equal(request.marketing_allowed,true);
+});
