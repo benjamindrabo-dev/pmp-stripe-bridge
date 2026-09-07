@@ -2,6 +2,7 @@
 'use strict';
 document.addEventListener('securitypolicyviolation',e=>{let url=e.blockedURI;try{const u=new URL(url);url=u.origin+u.pathname;}catch{}console.warn('Payment CSP blocked:',e.effectiveDirective,url);});
 const $=id=>document.getElementById(id);
+const walletMethods={};let selectedMethod='card';
 let sessionId=new URL(location.href).searchParams.get('session_id'), data, card, payments, busy=false;
 const text={
  en:{checkout:'Secure checkout',contact:'Contact',email:'Email',delivery:'Delivery address',first:'First name',last:'Last name',country:'Country',countryCode:'Billing country (two-letter code)',address:'Address',address2:'Apartment, suite (optional)',city:'City',state:'State / province / region',zip:'Postal code',same:'Billing address is the same as delivery',payment:'Payment',terms:'By ordering, you acknowledge our',policy:'shipping and returns policy',loading:'Loading secure payment…',pay:'Pay',summary:'Your order',shipping:'Shipping',total:'Total',promo:'Promotion code',apply:'Apply',back:'Return to store',processing:'Confirming your payment…',pending:'Your payment is being confirmed. Please keep this page open.',charge:'Your card will be charged {cad} CAD. Your bank determines the final amount in your card currency and any conversion fees.',walletHint:'Or pay with a digital wallet after completing your address.',expired:'This price quote has expired. Refresh the checkout to use the latest rate.'},
@@ -16,7 +17,7 @@ const fmt=amount=>new Intl.NumberFormat(data.locale||'en',{style:'currency',curr
 async function json(url,body){const r=await fetch(url,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined,cache:'no-store'});const d=await r.json();if(!r.ok)throw Error(d.error||'Checkout unavailable');return d;}
 function addr(prefix='') { return {first_name:$('first').value,last_name:$('last').value,address_line_1:$(prefix+'address').value,address_line_2:prefix?'':$('address2').value,locality:$(prefix+'city').value,administrative_district_level_1:$(prefix+'state').value,postal_code:$(prefix+'zip').value,country:prefix?$('bcountry').value.toUpperCase():data.country}; }
 function valid(){return $('checkout-form').reportValidity();}
-function setBusy(value){busy=value;$('pay').disabled=value;$('apply').disabled=value;$('country').disabled=value;document.querySelectorAll('[data-cart-edit]').forEach(b=>b.disabled=value);$('pay').textContent=value?t.processing:t.pay+' '+fmt(data.quote.displayAmount);}
+function setBusy(value){busy=value;$('pay').disabled=value;$('apply').disabled=value;$('country').disabled=value;document.querySelectorAll('[name="payment-method"]').forEach(r=>r.disabled=value);document.querySelectorAll('[data-cart-edit]').forEach(b=>b.disabled=value);$('pay').textContent=value?t.processing:t.pay+' '+fmt(data.quote.displayAmount);}
 async function poll(){for(let i=0;i<30;i++){const s=await json('/api/session-status?session_id='+sessionId);if(s.paid&&s.orderId){location.assign(s.returnUrl);return true;}await new Promise(r=>setTimeout(r,2000));}return false;}
 async function submit(tokenizer,method='card'){
  if(busy||!valid())return;
@@ -56,29 +57,31 @@ try{
    throw Error('Your payment is still being confirmed. Please contact us before placing another order.');
  }
  if(Date.now()>=Date.parse(data.quote.expiresAt)){const fresh=await json('/api/square-checkout',{sessionId});location.replace(fresh.checkoutUrl);return;}
+ for(const [lang,labels] of Object.entries({en:['Express checkout','OR','All transactions are secure and encrypted.'],fr:['Paiement express','OU','Toutes les transactions sont sécurisées et chiffrées.'],de:['Express-Checkout','ODER','Alle Transaktionen sind sicher und verschlüsselt.'],es:['Pago exprés','O','Todas las transacciones son seguras y están cifradas.'],it:['Pagamento rapido','OPPURE','Tutte le transazioni sono sicure e crittografate.'],pt:['Pagamento expresso','OU','Todas as transações são seguras e encriptadas.']}))Object.assign(text[lang],{express:labels[0],or:labels[1],encrypted:labels[2]});
  for(const [lang,label] of Object.entries({en:'Credit or debit card',fr:'Carte de crédit ou de débit',de:'Kredit- oder Debitkarte',es:'Tarjeta de crédito o débito',it:'Carta di credito o debito',pt:'Cartão de crédito ou débito'}))text[lang].cardLabel=label;
  t={...text.en,...text[String(data.locale||'en').split('-')[0]]};document.documentElement.lang=data.locale||'en';
  document.querySelectorAll('[data-i18n]').forEach(el=>{el.textContent=t[el.dataset.i18n]||text.en[el.dataset.i18n];});
  for(const c of data.countries||[{code:data.country}]){const o=document.createElement('option');o.value=c.code;o.textContent=new Intl.DisplayNames([data.locale||'en'],{type:'region'}).of(c.code);$('country').append(o);}$('country').value=data.country;$('bcountry').value=data.country;
  for(const it of data.items){const row=document.createElement('div');row.className='line';const label=document.createElement('span');label.textContent=it.title+' × '+it.quantity;const value=document.createElement('span');value.textContent=fmt(Number(it.price)*it.quantity);row.append(label,value);if(it.addon){const remove=document.createElement('button');remove.type='button';remove.className='remove-addon';remove.dataset.cartEdit='1';remove.textContent=extra().remove;remove.onclick=()=>revise({removeAddon:it.variantId});row.append(remove);}$('items').append(row);}
- $('mobile-total').textContent=fmt(data.quote.displayAmount);$('shipping').textContent=fmt(data.shipping);$('total').textContent=fmt(data.quote.displayAmount);$('promo').value=data.promotionCode||'';
+ $('mobile-total').textContent=fmt(data.quote.displayAmount);$('pay-total').textContent=fmt(data.quote.displayAmount);for(const row of $('items').children){const clone=row.cloneNode(true);clone.querySelectorAll('button').forEach(b=>b.remove());$('drawer-items').append(clone);}$('shipping').textContent=fmt(data.shipping);$('total').textContent=fmt(data.quote.displayAmount);$('promo').value=data.promotionCode||'';
  $('charge').textContent=t.charge.replace('{cad}',(data.quote.chargeMinor/100).toFixed(2));$('back').href=data.returnUrl.replace('/pages/thank-you','/cart');
  const script=document.createElement('script');script.src=data.environment==='production'?'https://web.squarecdn.com/v1/square.js':'https://sandbox.web.squarecdn.com/v1/square.js';await new Promise((resolve,reject)=>{script.onload=resolve;script.onerror=()=>reject(Error('Secure payment could not load. Please refresh.'));document.head.append(script);});
  payments=Square.payments(data.applicationId,data.locationId);try{await payments.setLocale(data.locale||'en');}catch{}
  card=await payments.card();await card.attach('#card');restoreDraft();setBusy(false);showSuggestions();
- $('checkout-form').addEventListener('submit',e=>{e.preventDefault();submit(v=>card.tokenize(v));});
+ $('checkout-form').addEventListener('submit',e=>{e.preventDefault();if(selectedMethod==='card')submit(v=>card.tokenize(v));else if(walletMethods[selectedMethod])submit(()=>walletMethods[selectedMethod].tokenize(),selectedMethod);});
+ document.querySelectorAll('[name="payment-method"]').forEach(r=>r.addEventListener('change',()=>{if(busy)return;selectedMethod=r.value;document.querySelectorAll('.method-row').forEach(row=>row.classList.toggle('selected',row.contains(r)));$('card-panel').hidden=selectedMethod!=='card';}));
  // Initialize wallets independently, in visible containers.
  $('wallets').hidden=false;
  const request=payments.paymentRequest({countryCode:'CA',currencyCode:'CAD',total:{amount:(data.quote.chargeMinor/100).toFixed(2),label:'Pure Majesty Pets'},requestBillingContact:true});
  let wallets=0;
- try{const apple=await payments.applePay(request);$('applepay').hidden=false;wallets++;$('applepay').onclick=()=>submit(()=>apple.tokenize(),'apple');}catch(e){console.warn('Apple Pay unavailable:',e.name,e.message);}
- try{const google=await payments.googlePay(request);await google.attach('#googlepay',{buttonColor:'white',buttonSizeMode:'fill',buttonType:'long',buttonRadius:6});wallets++;$('googlepay').addEventListener('click',e=>{e.preventDefault();submit(()=>google.tokenize(),'google');});}catch(e){console.warn('Google Pay unavailable:',e.name,e.message);}
+ try{const apple=await payments.applePay(request);walletMethods.apple=apple;$('method-apple').hidden=false;$('applepay').hidden=false;wallets++;$('applepay').onclick=()=>submit(()=>apple.tokenize(),'apple');}catch(e){console.warn('Apple Pay unavailable:',e.name,e.message);}
+ try{const google=await payments.googlePay(request);walletMethods.google=google;await google.attach('#googlepay',{buttonColor:'black',buttonSizeMode:'fill',buttonType:'long',buttonRadius:10});$('method-google').hidden=false;wallets++;$('googlepay').addEventListener('click',e=>{e.preventDefault();submit(()=>google.tokenize(),'google');});}catch(e){console.warn('Google Pay unavailable:',e.name,e.message);}
  try{
   const amount=(data.quote.chargeMinor/100).toFixed(2);
   const afterRequest=payments.paymentRequest({countryCode:'CA',currencyCode:'CAD',total:{amount,label:'Pure Majesty Pets'},requestShippingContact:true});
   afterRequest.addEventListener('afterpay_shippingaddresschanged',()=>({shippingOptions:[{amount:'0.00',id:'delivery',label:'Delivery',taxLineItems:[],total:{amount,label:'Total'}}]}));
   afterRequest.addEventListener('afterpay_shippingoptionchanged',()=>{});
-  const after=await payments.afterpayClearpay(afterRequest);await after.attach('#afterpay',{buttonColor:'green',buttonType:'buy_now_with_afterpay'});wallets++;$('afterpay').addEventListener('click',e=>{e.preventDefault();submit(()=>after.tokenize(),'afterpay');});
+  const after=await payments.afterpayClearpay(afterRequest);walletMethods.afterpay=after;await after.attach('#afterpay',{buttonColor:'green',buttonType:'buy_now_with_afterpay'});$('method-afterpay').hidden=false;wallets++;$('afterpay').addEventListener('click',e=>{e.preventDefault();submit(()=>after.tokenize(),'afterpay');});
  }catch(e){console.warn('Afterpay unavailable:',e.name,e.message);}
  if(!wallets)$('wallets').hidden=true;
 
