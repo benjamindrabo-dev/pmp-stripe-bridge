@@ -1182,7 +1182,21 @@ const JS = String.raw`(function(){
         nextInit.body = JSON.stringify(body);
       } catch (_) {}
 
-      return nativeFetch(input, nextInit).then(function(response){
+      var prepareSuggestions = Promise.resolve();
+      try {
+        var squareBody = JSON.parse(nextInit.body);
+        var firstProduct = squareBody.items && squareBody.items[0] && squareBody.items[0].product_id;
+        if(firstProduct){
+          var root=(window.Shopify&&window.Shopify.routes&&window.Shopify.routes.root)||'/';
+          var controller=new AbortController();var deadline=setTimeout(function(){controller.abort();},2500);
+          prepareSuggestions=nativeFetch(root+'recommendations/products.json?product_id='+encodeURIComponent(firstProduct)+'&limit=6',{signal:controller.signal}).then(function(r){return r.json();}).then(function(d){
+            var inCart={};squareBody.items.forEach(function(i){inCart[i.product_id]=true;});
+            squareBody.square_suggestions=(d.products||[]).filter(function(p){return p.available&&!inCart[p.id];}).map(function(p){var v=(p.variants||[]).filter(function(v){return v.available;})[0];return v?{variant_id:v.id,title:p.title}:null;}).filter(Boolean).slice(0,6);
+            nextInit.body=JSON.stringify(squareBody);
+          }).catch(function(){}).finally(function(){clearTimeout(deadline);});
+        }
+      }catch(_){}
+      return prepareSuggestions.then(function(){return nativeFetch(input,nextInit);}).then(function(response){
         if (!response.ok) {
           checkoutError('create_checkout', 'http_' + String(response.status || 0));
           return response;

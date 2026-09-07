@@ -22,6 +22,7 @@ export default async function handler(req, res) {
       ready:canProcessCards, environment, currency:location.currency,
       cardProcessing:canProcessCards,
       webhookConfigured:Boolean(process.env.SQUARE_WEBHOOK_SIGNATURE_KEY || (await get('square:webhook:'+environment))?.signature_key),
+      applePay:(await get('square:apple-pay:'+environment))?.status||'NOT_REGISTERED',
       provider:"square"
     });
   } catch {

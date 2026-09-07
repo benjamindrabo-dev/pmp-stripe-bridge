@@ -1,7 +1,7 @@
 (async function(){
 'use strict';
 const $=id=>document.getElementById(id);
-let sessionId=new URL(location.href).searchParams.get('session_id'), data, card, busy=false;
+let sessionId=new URL(location.href).searchParams.get('session_id'), data, card, payments, busy=false;
 const text={
  en:{checkout:'Secure checkout',contact:'Contact',email:'Email',delivery:'Delivery address',first:'First name',last:'Last name',country:'Country',countryCode:'Billing country (two-letter code)',address:'Address',address2:'Apartment, suite (optional)',city:'City',state:'State / province / region',zip:'Postal code',same:'Billing address is the same as delivery',payment:'Payment',terms:'By ordering, you acknowledge our',policy:'shipping and returns policy',loading:'Loading secure payment…',pay:'Pay',summary:'Your order',shipping:'Shipping',total:'Total',promo:'Promotion code',apply:'Apply',back:'Return to store',processing:'Confirming your payment…',pending:'Your payment is being confirmed. Please keep this page open.',charge:'Your card will be charged {cad} CAD. Your bank determines the final amount in your card currency and any conversion fees.',walletHint:'Or pay with a digital wallet after completing your address.',expired:'This price quote has expired. Refresh the checkout to use the latest rate.'},
  fr:{checkout:'Paiement sécurisé',contact:'Coordonnées',email:'E-mail',delivery:'Adresse de livraison',first:'Prénom',last:'Nom',country:'Pays',countryCode:'Pays de facturation (code à deux lettres)',address:'Adresse',address2:'Appartement, suite (facultatif)',city:'Ville',state:'Province / État / région',zip:'Code postal',same:'Adresse de facturation identique à la livraison',payment:'Paiement',terms:'En commandant, vous reconnaissez avoir pris connaissance de notre',policy:'politique de livraison et de remboursement',loading:'Chargement du paiement sécurisé…',pay:'Payer',summary:'Votre commande',shipping:'Livraison',total:'Total',promo:'Code promotionnel',apply:'Appliquer',back:'Retour à la boutique',processing:'Confirmation de votre paiement…',pending:'Confirmation du paiement en cours. Gardez cette page ouverte.',charge:'Votre carte sera débitée de {cad} CAD. Votre banque détermine le montant final dans la devise de votre carte et les éventuels frais de change.',walletHint:'Ou payez avec un portefeuille numérique après avoir rempli votre adresse.',expired:'Ce taux a expiré. Actualisez le paiement pour utiliser le dernier taux.'},
@@ -15,29 +15,38 @@ const fmt=amount=>new Intl.NumberFormat(data.locale||'en',{style:'currency',curr
 async function json(url,body){const r=await fetch(url,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined,cache:'no-store'});const d=await r.json();if(!r.ok)throw Error(d.error||'Checkout unavailable');return d;}
 function addr(prefix='') { return {first_name:$('first').value,last_name:$('last').value,address_line_1:$(prefix+'address').value,address_line_2:prefix?'':$('address2').value,locality:$(prefix+'city').value,administrative_district_level_1:$(prefix+'state').value,postal_code:$(prefix+'zip').value,country:prefix?$('bcountry').value.toUpperCase():data.country}; }
 function valid(){return $('checkout-form').reportValidity();}
-function setBusy(value){busy=value;$('pay').disabled=value;$('apply').disabled=value;$('pay').textContent=value?t.processing:t.pay+' '+fmt(data.quote.displayAmount);}
+function setBusy(value){busy=value;$('pay').disabled=value;$('apply').disabled=value;$('country').disabled=value;document.querySelectorAll('[data-cart-edit]').forEach(b=>b.disabled=value);$('pay').textContent=value?t.processing:t.pay+' '+fmt(data.quote.displayAmount);}
 async function poll(){for(let i=0;i<30;i++){const s=await json('/api/session-status?session_id='+sessionId);if(s.paid&&s.orderId){location.assign(s.returnUrl);return true;}await new Promise(r=>setTimeout(r,2000));}return false;}
-async function submit(tokenizer){
+async function submit(tokenizer,method='card'){
  if(busy||!valid())return;
  if(Date.now()>=Date.parse(data.quote.expiresAt)){$('status').textContent=t.expired;return;}
  setBusy(true);$('status').className='';$('status').textContent=t.processing;
  try{
-  const shipping=addr(), billing=$('same').checked?shipping:addr('b');
+  let shipping=addr();const billing=$('same').checked?shipping:addr('b');
   const verification={amount:(data.quote.chargeMinor/100).toFixed(2),currencyCode:'CAD',intent:'CHARGE',customerInitiated:true,sellerKeyedIn:false,billingContact:{givenName:billing.first_name,familyName:billing.last_name,email:$('email').value,addressLines:[billing.address_line_1,billing.address_line_2].filter(Boolean),city:billing.locality,state:billing.administrative_district_level_1,postalCode:billing.postal_code,countryCode:billing.country}};
   const token=await tokenizer(verification);
   if(token.status!=='OK')throw Error(token.errors?.map(e=>e.message).join(' ')||'Payment information could not be verified.');
-  const result=await json('/api/square-pay',{sessionId,sourceId:token.token,email:$('email').value,shipping,billing,confirmedChargeMinor:data.quote.chargeMinor});
+  if(method==='afterpay'){const a=token.details?.shipping?.contact;if(!a||a.countryCode!==data.country)throw Error('Select the same delivery country in checkout and Afterpay.');shipping={first_name:a.givenName,last_name:a.familyName,address_line_1:a.addressLines?.[0],address_line_2:a.addressLines?.slice(1).join(' '),locality:a.city,administrative_district_level_1:a.state,postal_code:a.postalCode,country:a.countryCode};}
+  let verificationToken;if(method==='apple'||method==='google'){const verified=await payments.verifyBuyer(token.token,verification);verificationToken=verified.token;}
+  const result=await json('/api/square-pay',{sessionId,sourceId:token.token,verificationToken,email:$('email').value,shipping,billing,confirmedChargeMinor:data.quote.chargeMinor});
   if(result.paid&&result.returnUrl){location.assign(result.returnUrl);return;}
   $('status').textContent=t.pending;if(await poll())return;
   $('status').textContent=t.pending;setBusy(false);
  }catch(e){$('status').className='error';$('status').textContent=e.message;setBusy(false);}
 }
+function extra(){const lang=String(data?.locale||'en').split('-')[0];return ({fr:{title:'Complétez votre commande',add:'Ajouter',remove:'Retirer',updating:'Mise à jour du total…'},de:{title:'Bestellung ergänzen',add:'Hinzufügen',remove:'Entfernen',updating:'Gesamtbetrag wird aktualisiert…'},es:{title:'Completa tu pedido',add:'Añadir',remove:'Quitar',updating:'Actualizando el total…'},it:{title:'Completa il tuo ordine',add:'Aggiungi',remove:'Rimuovi',updating:'Aggiornamento del totale…'},pt:{title:'Complete a sua encomenda',add:'Adicionar',remove:'Remover',updating:'A atualizar o total…'}})[lang]||{title:'Complete your order',add:'Add',remove:'Remove',updating:'Updating your total…'};}
+function saveDraft(next){try{const values={};for(const id of ['email','first','last','address','address2','city','state','zip','bcountry','baddress','bcity','bstate','bzip'])values[id]=$(id).value;sessionStorage.setItem('pmp:square-draft',JSON.stringify({at:Date.now(),values,same:$('same').checked,country:data.country}));}catch{}}
+function restoreDraft(){try{const d=JSON.parse(sessionStorage.getItem('pmp:square-draft')||'null');if(!d||Date.now()-d.at>1800000)return;for(const [id,v]of Object.entries(d.values))if($(id))$(id).value=v;$('same').checked=d.same;$('same').dispatchEvent(new Event('change'));if(d.country!==data.country){$('state').value='';$('zip').value='';if(d.same)$('bcountry').value=data.country;}}catch{}}
+async function revise(change){if(busy)return;setBusy(true);$('status').textContent=extra().updating;try{saveDraft();const next=await json('/api/square-checkout',{sessionId,email:$('email').value,...change});location.assign(next.checkoutUrl);}catch(e){$('country').value=data.country;$('status').className='error';$('status').textContent=e.message;setBusy(false);}}
+async function showSuggestions(){try{const result=await json('/api/square-options?session_id='+sessionId);if(!result.suggestions?.length)return;const h=document.createElement('h2');h.textContent=extra().title;$('suggestions').append(h);for(const it of result.suggestions){const row=document.createElement('div');row.className='line';if(it.image){const img=document.createElement('img');img.src=it.image;img.alt='';row.append(img);}const label=document.createElement('span');label.textContent=it.title+' — '+fmt(it.price);const b=document.createElement('button');b.type='button';b.dataset.cartEdit='1';b.textContent=extra().add;b.onclick=()=>revise({addVariant:it.variantId});row.append(label,b);$('suggestions').append(row);}}catch{}}
 $('email').addEventListener('blur',()=>{if($('email').value&&$('email').checkValidity())json('/api/square-checkout',{action:'contact',sessionId,email:$('email').value}).catch(()=>{});});
 $('same').addEventListener('change',()=>{$('billing').hidden=$('same').checked;for(const id of ['bcountry','baddress','bcity'])$(id).required=!$('same').checked;});
-$('apply').addEventListener('click',async()=>{if(busy)return;$('apply').disabled=true;try{const next=await json('/api/square-checkout',{sessionId,promotionCode:$('promo').value,email:$('email').value});location.assign(next.checkoutUrl);}catch(e){$('promo-status').textContent=e.message;$('apply').disabled=false;}});
+$('apply').addEventListener('click',()=>revise({promotionCode:$('promo').value}));
+$('country').addEventListener('change',()=>revise({country:$('country').value}));
 try{
  if(!/^sq_[a-f0-9]{32}$/.test(sessionId||''))throw Error('Invalid checkout link. Please return to the store.');
  data=await json('/api/square-checkout?session_id='+sessionId);
+ if(data.successor){location.replace('/square-checkout.html?session_id='+data.successor);return;}
  if(data.completed){const status=await json('/api/session-status?session_id='+sessionId);if(status.returnUrl){location.assign(status.returnUrl);return;}}
  if(data.paymentPending){
    $('status').textContent='Confirming your payment…';
@@ -48,17 +57,28 @@ try{
  if(Date.now()>=Date.parse(data.quote.expiresAt)){const fresh=await json('/api/square-checkout',{sessionId});location.replace(fresh.checkoutUrl);return;}
  t={...text.en,...text[String(data.locale||'en').split('-')[0]]};document.documentElement.lang=data.locale||'en';
  document.querySelectorAll('[data-i18n]').forEach(el=>{el.textContent=t[el.dataset.i18n]||text.en[el.dataset.i18n];});
- $('country').value=new Intl.DisplayNames([data.locale||'en'],{type:'region'}).of(data.country);$('bcountry').value=data.country;
- for(const it of data.items){const row=document.createElement('div');row.className='line';const label=document.createElement('span');label.textContent=it.title+' × '+it.quantity;const value=document.createElement('span');value.textContent=fmt(Number(it.price)*it.quantity);row.append(label,value);$('items').append(row);}
+ for(const c of data.countries||[{code:data.country}]){const o=document.createElement('option');o.value=c.code;o.textContent=new Intl.DisplayNames([data.locale||'en'],{type:'region'}).of(c.code);$('country').append(o);}$('country').value=data.country;$('bcountry').value=data.country;
+ for(const it of data.items){const row=document.createElement('div');row.className='line';const label=document.createElement('span');label.textContent=it.title+' × '+it.quantity;const value=document.createElement('span');value.textContent=fmt(Number(it.price)*it.quantity);row.append(label,value);if(it.addon){const remove=document.createElement('button');remove.type='button';remove.className='remove-addon';remove.dataset.cartEdit='1';remove.textContent=extra().remove;remove.onclick=()=>revise({removeAddon:it.variantId});row.append(remove);}$('items').append(row);}
  $('shipping').textContent=fmt(data.shipping);$('total').textContent=fmt(data.quote.displayAmount);$('promo').value=data.promotionCode||'';
  $('charge').textContent=t.charge.replace('{cad}',(data.quote.chargeMinor/100).toFixed(2));$('back').href=data.returnUrl.replace('/pages/thank-you','/cart');
  const script=document.createElement('script');script.src=data.environment==='production'?'https://web.squarecdn.com/v1/square.js':'https://sandbox.web.squarecdn.com/v1/square.js';await new Promise((resolve,reject)=>{script.onload=resolve;script.onerror=()=>reject(Error('Secure payment could not load. Please refresh.'));document.head.append(script);});
- const payments=Square.payments(data.applicationId,data.locationId);try{await payments.setLocale(data.locale||'en');}catch{}
- card=await payments.card();await card.attach('#card');setBusy(false);
+ payments=Square.payments(data.applicationId,data.locationId);try{await payments.setLocale(data.locale||'en');}catch{}
+ card=await payments.card();await card.attach('#card');restoreDraft();setBusy(false);showSuggestions();
  $('checkout-form').addEventListener('submit',e=>{e.preventDefault();submit(v=>card.tokenize(v));});
- // Wallet availability is controlled by Square and the buyer's browser.
+ // Initialize wallets independently, in visible containers.
+ $('wallets').hidden=false;
  const request=payments.paymentRequest({countryCode:'CA',currencyCode:'CAD',total:{amount:(data.quote.chargeMinor/100).toFixed(2),label:'Pure Majesty Pets'},requestBillingContact:true});
- try{const apple=await payments.applePay(request);$('applepay').hidden=false;$('wallets').hidden=false;$('applepay').onclick=()=>submit(()=>apple.tokenize());}catch{}
- try{const google=await payments.googlePay(request);await google.attach('#googlepay');$('wallets').hidden=false;$('googlepay').addEventListener('click',e=>{e.preventDefault();submit(()=>google.tokenize());});}catch{}
+ let wallets=0;
+ try{const apple=await payments.applePay(request);$('applepay').hidden=false;wallets++;$('applepay').onclick=()=>submit(()=>apple.tokenize(),'apple');}catch(e){console.warn('Apple Pay unavailable:',e.name,e.message);}
+ try{const google=await payments.googlePay(request);await google.attach('#googlepay');wallets++;$('googlepay').addEventListener('click',e=>{e.preventDefault();submit(()=>google.tokenize(),'google');});}catch(e){console.warn('Google Pay unavailable:',e.name,e.message);}
+ try{
+  const amount=(data.quote.chargeMinor/100).toFixed(2);
+  const afterRequest=payments.paymentRequest({countryCode:'CA',currencyCode:'CAD',total:{amount,label:'Pure Majesty Pets'},requestShippingContact:true});
+  afterRequest.addEventListener('afterpay_shippingaddresschanged',()=>({shippingOptions:[{amount:'0.00',id:'delivery',label:'Delivery',taxLineItems:[],total:{amount,label:'Total'}}]}));
+  afterRequest.addEventListener('afterpay_shippingoptionchanged',()=>{});
+  const after=await payments.afterpayClearpay(afterRequest);await after.attach('#afterpay');wallets++;$('afterpay').addEventListener('click',e=>{e.preventDefault();submit(()=>after.tokenize(),'afterpay');});
+ }catch(e){console.warn('Afterpay unavailable:',e.name,e.message);}
+ if(!wallets)$('wallets').hidden=true;
+
 }catch(e){$('status').className='error';$('status').textContent=e.message;}
 })();
