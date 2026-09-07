@@ -78,7 +78,7 @@ try{
   const afterRequest=payments.paymentRequest({countryCode:'CA',currencyCode:'CAD',total:{amount,label:'Pure Majesty Pets'},requestShippingContact:true});
   afterRequest.addEventListener('afterpay_shippingaddresschanged',()=>({shippingOptions:[{amount:'0.00',id:'delivery',label:'Delivery',taxLineItems:[],total:{amount,label:'Total'}}]}));
   afterRequest.addEventListener('afterpay_shippingoptionchanged',()=>{});
-  const after=await payments.afterpayClearpay(afterRequest);await after.attach('#afterpay',{buttonColor:'mint',buttonType:'buy_now_with_afterpay'});wallets++;$('afterpay').addEventListener('click',e=>{e.preventDefault();submit(()=>after.tokenize(),'afterpay');});
+  const after=await payments.afterpayClearpay(afterRequest);await after.attach('#afterpay',{buttonColor:'green',buttonType:'buy_now_with_afterpay'});wallets++;$('afterpay').addEventListener('click',e=>{e.preventDefault();submit(()=>after.tokenize(),'afterpay');});
  }catch(e){console.warn('Afterpay unavailable:',e.name,e.message);}
  if(!wallets)$('wallets').hidden=true;
 
