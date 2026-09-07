@@ -12,7 +12,7 @@ test('CAD allocation keeps exact total with bundles and gifts',()=>{
  assert.deepEqual(allocate(200,[50,50,50]),[67,67,66]);
  assert.deepEqual(allocate(200,[0,150,0]),[0,200,0]);
  const order=buildOrder(cart,payment,attempt);
- assert.equal(order.presentmentCurrency,'USD');assert.equal(order.sourceName,undefined,'Let Shopify attribute the order to the authenticated app, not protected web source');
+ assert.equal(order.presentmentCurrency,'USD');assert.ok(order.lineItems.every(line=>line.requiresShipping===true),'Physical products and gifts must require shipping for fulfillment and notification addresses');assert.equal(order.sourceName,undefined,'Let Shopify attribute the order to the authenticated app, not protected web source');
  assert.equal(order.transactions[0].amountSet.presentmentMoney.amount,'1.50');
  assert.equal(order.transactions[0].amountSet.shopMoney.amount,'2.00');
  assert.equal(order.lineItems.reduce((s,l)=>s+Math.round(Number(l.priceSet.shopMoney.amount)*100)*l.quantity,0),200);
