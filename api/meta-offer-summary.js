@@ -1118,6 +1118,22 @@ const JS = String.raw`(function(){
       return true;
     }
 
+    // Confirm the Square purchase before firing browser conversions or clearing the cart.
+    var squareSession = new URL(location.href).searchParams.get('session_id');
+    if (/^sq_[a-f0-9]{32}$/.test(squareSession || '')) {
+      nativeFetch('https://pmp-stripe-bridge.vercel.app/api/session-status?session_id='+encodeURIComponent(squareSession),{cache:'no-store'}).then(function(r){return r.json();}).then(function(s){
+        if(!s.paid || !s.orderId)return;
+        var key='pmp:square-purchase:'+squareSession;
+        var sent=false;try{sent=sessionStorage.getItem(key)==='1';}catch(_){}
+        if(!sent){
+          if(typeof window.fbq==='function')window.fbq('track','Purchase',{value:s.amount/100,currency:s.currency},{eventID:squareSession});
+          if(typeof window.gtag==='function')window.gtag('event','conversion',{send_to:'AW-18031615333/jlQICMeV844cEOW6kpZD',value:s.amount/100,currency:s.currency,transaction_id:squareSession});
+          try{sessionStorage.setItem(key,'1');}catch(_){}
+          nativeFetch('/cart/clear.js',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).catch(function(){});
+        }
+      }).catch(function(){});
+    }
+
     function selectedCountry(){
       var selector = document.querySelector('#PmpHeaderCountrySelectorV3');
       var value = selector && String(selector.value || '').trim().toUpperCase();
@@ -1162,6 +1178,7 @@ const JS = String.raw`(function(){
         var country = selectedCountry();
         if (country) body.checkout_country = country;
         injectAttribution(body);
+        body.payment_provider = "square";
         nextInit.body = JSON.stringify(body);
       } catch (_) {}
 
@@ -1176,6 +1193,14 @@ const JS = String.raw`(function(){
         return Promise.resolve().then(function(){
           return response.clone().json();
         }).then(function(data){
+          if (data && data.provider === 'square' && data.sessionId && data.checkoutUrl) {
+            var squareUrl = new URL(data.checkoutUrl);
+            if (squareUrl.origin !== 'https://pmp-stripe-bridge.vercel.app' || squareUrl.pathname !== '/square-checkout.html') throw new Error('Invalid checkout URL');
+            beginCheckout(data);
+            window.location.assign(squareUrl.href);
+            // Stop legacy Stripe mounting while this document navigates away.
+            return new Promise(function(){});
+          }
           if (!data || !data.clientSecret || !data.sessionId) {
             checkoutError('create_checkout', 'invalid_success_payload');
           } else {
@@ -1324,6 +1349,6 @@ const JS = String.raw`(function(){
 export default function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).send('Method not allowed');
   res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-  res.setHeader('Cache-Control', 'public, max-age=60');
+  res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
   return res.status(200).send(JS);
 }

@@ -38,9 +38,6 @@
     "api/square-webhook.js": {
       "maxDuration": 60
     },
-    "api/square-verify.js": {
-      "maxDuration": 60
-    },
     "api/create-checkout.js": {
       "maxDuration": 60
     }

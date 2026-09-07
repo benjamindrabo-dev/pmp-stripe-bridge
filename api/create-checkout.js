@@ -53,6 +53,10 @@ globalThis.fetch = async function pmpCampaignAwareFetch(input, init) {
 };
 
 export default async function handler(req, res) {
+  if (req.body?.payment_provider === 'square') {
+    req.squareMode = true;
+    return baseHandler(req,res);
+  }
   const applyMetaOffer = qualifiesForMetaOffer(req && req.body);
   return requestScope.run({ applyMetaOffer }, () => baseHandler(req, res));
 }

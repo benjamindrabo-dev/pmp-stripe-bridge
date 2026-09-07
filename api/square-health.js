@@ -1,3 +1,4 @@
+import {get} from '../lib/square-bridge.js';
 // Read-only readiness check. Never returns credentials or merchant/customer details.
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -20,8 +21,8 @@ export default async function handler(req, res) {
     return res.status(canProcessCards ? 200 : 503).json({
       ready:canProcessCards, environment, currency:location.currency,
       cardProcessing:canProcessCards,
-      webhookConfigured:Boolean(process.env.SQUARE_WEBHOOK_SIGNATURE_KEY),
-      provider:process.env.CHECKOUT_PROVIDER === "square" ? "square" : "stripe"
+      webhookConfigured:Boolean(process.env.SQUARE_WEBHOOK_SIGNATURE_KEY || (await get('square:webhook:'+environment))?.signature_key),
+      provider:"square"
     });
   } catch {
     return res.status(503).json({ready:false, environment, error:"Square verification unavailable"});
