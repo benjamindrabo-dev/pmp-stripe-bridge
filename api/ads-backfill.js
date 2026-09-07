@@ -79,6 +79,8 @@ export default async function handler(req, res) {
 
   if (!authorized) return res.status(401).json({ error: "unauthorized" });
 
+  try { const {drainSquareAds}=await import('../lib/square-bridge.js'); await drainSquareAds(20); } catch(e) { console.error('Square Ads retry',e.message); }
+
   if (!adsConfigured()) {
     return res.status(200).json({ ok: false, skipped: "ads_not_configured" });
   }

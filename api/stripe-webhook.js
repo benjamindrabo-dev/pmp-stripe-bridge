@@ -1584,3 +1584,6 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "unexpected error, retry" });
   }
 }
+
+// Shared analytics delivery for verified Square purchases.
+export { ga4PersistIntent, ga4TrySend, metaPersistIntent, metaTrySend };

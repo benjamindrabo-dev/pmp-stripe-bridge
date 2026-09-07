@@ -1,3 +1,4 @@
+import {get,validId,settleSquarePayment} from '../lib/square-bridge.js';
 // GET /api/session-status?session_id=cs_xxx
 // Read-only helper for the custom thank-you page. It returns the signed Stripe
 // payment state, amount and currency so browser ad tags only fire after payment.
@@ -64,6 +65,20 @@ export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
   const id = (req.query && req.query.session_id) || "";
+  if (validId(id)) {
+    res.setHeader("Cache-Control", "no-store");
+    try {
+      let done = await get('done:'+id);
+      if (!done) {
+        const attempt = await get('square:attempt:'+id);
+        if (attempt?.paymentId) {
+          try { await settleSquarePayment(attempt.paymentId); } catch {}
+          done = await get('done:'+id);
+        }
+      }
+      return res.status(200).json(done ? {status:'complete',paid:true,sessionId:id,...done} : {status:'open',paid:false,sessionId:id});
+    } catch { return res.status(503).json({error:'Payment verification unavailable'}); }
+  }
   if (!/^cs_[A-Za-z0-9_]+$/.test(id)) return res.status(400).json({ error: "Bad session_id" });
 
   try {
