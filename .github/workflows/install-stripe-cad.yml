@@ -1,0 +1,36 @@
+name: Install and validate Stripe CAD checkout
+on:
+  push:
+    paths:
+      - .github/workflows/install-stripe-cad.yml
+      - scripts/install-stripe-cad.py
+permissions:
+  contents: write
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Generate isolated Stripe checkout
+        run: python3 scripts/install-stripe-cad.py
+      - name: Syntax checks
+        run: |
+          node --check lib/stripe-cad-bridge.js
+          node --check lib/stripe-cad-cart.js
+          node --check api/stripe-checkout.js
+          node --check public/stripe-checkout.js
+          node --check api/create-checkout.js
+          node --check api/stripe-webhook.js
+          node --check api/session-status.js
+      - name: Regression tests
+        run: node --test
+      - name: Commit validated integration
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib api public test vercel.json
+          git commit -m 'Add validated Stripe CAD checkout retaining local pricing and original layout'
+          git push
