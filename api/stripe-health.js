@@ -33,11 +33,15 @@ async function signatureProbe(secret) {
     body: raw, signal: AbortSignal.timeout(10000),
   });
   const invalid = await post('0'.repeat(64));
+  const invalidBody = await invalid.json().catch(() => null);
   const valid = await post(signature);
   const body = await valid.json().catch(() => null);
   const result = {
     validSignatureAccepted: valid.status === 200 && body?.received === true,
-    invalidSignatureRejected: invalid.status === 400,
+    // stripe-webhook.js rejects invalid signatures with 401, not malformed-JSON 400.
+    invalidSignatureRejected: invalid.status === 401 && invalidBody?.error === 'Bad signature',
+    validSignatureStatus: valid.status,
+    invalidSignatureStatus: invalid.status,
     paidEventTested: false,
   };
   probeCache = { at: Date.now(), result };
@@ -51,7 +55,7 @@ export default async function handler(req, res) {
   const signingSecret = process.env.STRIPE_WEBHOOK_SECRET || '';
   const publicKey = process.env.STRIPE_PUBLISHABLE_KEY || '';
   const report = {
-    revision: 'pmp-stripe-account-migration-2026-09-09',
+    revision: 'pmp-stripe-account-migration-2026-09-09-r2',
     serverKeyConfigured: /^(sk|rk)_live_/.test(secret),
     webhookSecretMatches: createHash('sha256').update(signingSecret).digest('hex') === WEBHOOK_FINGERPRINT,
     publishableKeyConfigured: /^pk_live_[A-Za-z0-9]+$/.test(publicKey),
@@ -80,6 +84,8 @@ export default async function handler(req, res) {
     }
     report.serverReady = report.serverKeyConfigured && report.webhookSecretMatches && report.accountMatches &&
       report.chargesEnabled && report.webhookRegistered;
+    if (wantsProbe) report.serverReady = report.serverReady && report.signatureProbe?.validSignatureAccepted === true &&
+      report.signatureProbe?.invalidSignatureRejected === true;
     return res.status(200).json(report);
   } catch {
     return res.status(503).json({ ...report, serverReady: false, error: 'Configuration verification unavailable' });
