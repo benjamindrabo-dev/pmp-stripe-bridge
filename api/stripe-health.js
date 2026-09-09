@@ -56,6 +56,7 @@ export default async function handler(req, res) {
   const publicKey = process.env.STRIPE_PUBLISHABLE_KEY || (await import('../lib/stripe-cad-bridge.js')).PUBLIC_KEY;
   const report = {
     revision: 'pmp-stripe-reactivated-square-layout-2026-09-09',
+    walletDomainIntegration: 'fixed-checkout-domain-v1',
     checkoutProvider: 'stripe',
     chargeCurrency: 'CAD',
     displayCurrency: 'shopify_market',
@@ -68,7 +69,7 @@ export default async function handler(req, res) {
   };
   try {
     if (report.serverKeyConfigured) {
-      if (!cached || Date.now() - cached.at > 60000) {
+      if (!cached || Date.now() - cached.at > 60000 || !cached.walletDomain) {
         const [account, webhook] = await Promise.all([
           stripeGet('account', secret), stripeGet('webhook_endpoints/' + WEBHOOK_ID, secret),
         ]);
