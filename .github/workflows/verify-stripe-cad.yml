@@ -1,0 +1,42 @@
+name: Verify Stripe CAD checkout without charging
+on:
+  push:
+    paths:
+      - .github/workflows/verify-stripe-cad.yml
+      - scripts/verify-stripe-cad.mjs
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install browser test tools
+        run: |
+          mkdir -p /tmp/pmp-qa
+          cd /tmp/pmp-qa
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+      - name: Confirm Stripe frontend deployment
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS https://checkout.puremajestypet.com/stripe-checkout.js | grep -q stripeClient.confirmPayment; then exit 0; fi
+            sleep 4
+          done
+          exit 1
+      - name: Regression tests
+        run: node --test
+      - name: Verify live form without submitting card data
+        run: node scripts/verify-stripe-cad.mjs
+      - name: Save verification screenshots and report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stripe-cad-checkout-verification
+          path: /tmp/pmp-qa/results
+          retention-days: 3
