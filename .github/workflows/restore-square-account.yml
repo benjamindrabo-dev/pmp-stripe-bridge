@@ -1,0 +1,212 @@
+name: Restore Square account and verify checkout
+on:
+  push:
+    paths:
+      - '.github/workflows/restore-square-account.yml'
+permissions:
+  contents: write
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Restore Square routing and isolate account configuration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          root=Path('.')
+          def replace(path, old, new):
+              p=root/path
+              s=p.read_text()
+              if s.count(old)!=1:
+                  raise RuntimeError('Expected exactly one patch target: '+path)
+              p.write_text(s.replace(old,new,1))
+          replace('api/create-checkout.js',
+              'if (process.env.PMP_LEGACY_CHECKOUT !== "1" || req.body?.payment_provider === "stripe_cad_preview") { req.squareMode = true; req.stripeCadMode = true; return baseHandler(req,res); }',
+              '// Square restored for the storefront; legacy Stripe settlement endpoints remain available.\n  if (req.body?.payment_provider === "square" || process.env.PMP_LEGACY_CHECKOUT !== "1") { req.squareMode = true; req.stripeCadMode = false; return baseHandler(req,res); }')
+          replace('lib/square-bridge.js',
+              "export const activeSquare = () => process.env.CHECKOUT_PROVIDER !== 'stripe';",
+              "// Explicit restoration requested by the merchant; do not let an obsolete Stripe flag disable Square.\nexport const activeSquare = () => true;")
+          replace('lib/square-bridge.js',
+              "export const WEBHOOK_URL = 'https://pmp-stripe-bridge.vercel.app/api/square-webhook';",
+              """export const WEBHOOK_URL = 'https://pmp-stripe-bridge.vercel.app/api/square-webhook';
+          export function squareAccountScope(env=process.env) {
+            return crypto.createHash('sha256').update([env.SQUARE_ENV,env.SQUARE_APPLICATION_ID,env.SQUARE_LOCATION_ID].join('|')).digest('hex').slice(0,24);
+          }
+          export const squareWebhookKey = () => 'square:webhook:v2:'+squareAccountScope();
+          export const squareApplePayKey = () => 'square:apple-pay:v2:'+squareAccountScope()+':'+new URL(BRIDGE_ORIGIN).hostname;
+          export const squareVerificationKey = () => 'square:verification:v2:'+squareAccountScope();
+          // Fixed configuration checks only: no payment creation or card information.
+          async function verifySquareWebhook(subscription) {
+            const prior=await get(squareVerificationKey());
+            if(prior?.squareDeliveryStatus===200 && prior?.invalidSignatureRejected)return;
+            if(prior?.checkedAt && Date.now()-prior.checkedAt<60000)return;
+            const result={checkedAt:Date.now(),squareDeliveryStatus:null,invalidSignatureRejected:false};
+            try {
+              const tested=await square('/webhooks/subscriptions/'+encodeURIComponent(subscription.id)+'/test',{event_type:'payment.created'});
+              result.squareDeliveryStatus=tested.subscription_test_result?.status_code ?? null;
+              const invalid=await fetch(WEBHOOK_URL,{
+                method:'POST',redirect:'error',
+                headers:{'Content-Type':'application/json','x-square-hmacsha256-signature':'invalid-configuration-probe'},
+                body:JSON.stringify({type:'pmp.configuration_probe',data:{}}),signal:AbortSignal.timeout(10000)
+              });
+              result.invalidSignatureRejected=invalid.status===401;
+            } catch { /* Keep the subscription and retry verification on a later quote. */ }
+            await set(squareVerificationKey(),result,86400*30);
+          }""")
+          replace('lib/square-bridge.js',
+              "const key='square:apple-pay:'+process.env.SQUARE_ENV+':'+new URL(BRIDGE_ORIGIN).hostname;const saved=await get(key);if(saved?.status==='VERIFIED')return saved;",
+              "const key=squareApplePayKey();const saved=await get(key);if(saved?.status==='VERIFIED')return saved;")
+          replace('lib/square-bridge.js',
+              "const key='square:webhook:'+process.env.SQUARE_ENV;\n  const existing=await get(key);\n  if(existing?.signature_key)return existing;",
+              "const key=squareWebhookKey();\n  const existing=await get(key);\n  if(existing?.signature_key){await verifySquareWebhook(existing);return existing;}")
+          replace('lib/square-bridge.js',
+              ".update(WEBHOOK_URL+process.env.SQUARE_ENV+process.env.SQUARE_LOCATION_ID)",
+              ".update(WEBHOOK_URL+squareAccountScope())")
+          replace('lib/square-bridge.js',
+              "await set(key,result.subscription,315360000);\n  return result.subscription;",
+              "await set(key,result.subscription,315360000);\n  await verifySquareWebhook(result.subscription);\n  return result.subscription;")
+          replace('lib/square-bridge.js',
+              "let attempt=await get('square:attempt:'+id);\n    if(attempt?.paymentId)",
+              "let attempt=await get('square:attempt:'+id);\n    // Never resubmit an earlier account's uncertain payment against the new account.\n    if(attempt?.request?.location_id && attempt.request.location_id!==process.env.SQUARE_LOCATION_ID)throw error('This payment belongs to the previous checkout account. Contact us before trying another payment.',409);\n    if(attempt?.paymentId)")
+          replace('api/square-webhook.js',
+              "import {get,WEBHOOK_URL,settleSquarePayment} from '../lib/square-bridge.js';",
+              "import {get,WEBHOOK_URL,settleSquarePayment,squareWebhookKey,validId} from '../lib/square-bridge.js';")
+          replace('api/square-webhook.js',
+              "const saved=await get('square:webhook:'+process.env.SQUARE_ENV);",
+              "const saved=await get(squareWebhookKey());")
+          replace('api/square-webhook.js',
+              "process.env.SQUARE_WEBHOOK_SIGNATURE_KEY||saved?.signature_key",
+              "saved?.signature_key")
+          replace('api/square-webhook.js',
+              "if(!payment?.id||payment.status!=='COMPLETED')",
+              "if(!payment?.id||!validId(payment.reference_id)||payment.status!=='COMPLETED')")
+          Path('api/square-health.js').write_text("""import {get,squareAccountScope,squareWebhookKey,squareApplePayKey,squareVerificationKey} from '../lib/square-bridge.js';
+          // Read-only. Returns no access tokens, signing keys, bank or customer data.
+          export default async function handler(req,res) {
+            res.setHeader('Cache-Control','no-store');
+            if(req.method!=='GET')return res.status(405).end();
+            const required=['SQUARE_ACCESS_TOKEN','SQUARE_LOCATION_ID','SQUARE_APPLICATION_ID','SQUARE_ENV'];
+            const missing=required.filter(k=>!process.env[k]);
+            if(missing.length)return res.status(503).json({ready:false,missing});
+            const environment=process.env.SQUARE_ENV;
+            if(!['production','sandbox'].includes(environment))return res.status(503).json({ready:false,error:'Invalid SQUARE_ENV'});
+            try {
+              const base=environment==='production'?'https://connect.squareup.com':'https://connect.squareupsandbox.com';
+              const response=await fetch(base+'/v2/locations/'+encodeURIComponent(process.env.SQUARE_LOCATION_ID),{
+                headers:{Authorization:'Bearer '+process.env.SQUARE_ACCESS_TOKEN,'Square-Version':'2026-08-19'},signal:AbortSignal.timeout(8000)
+              });
+              const data=await response.json();
+              if(!response.ok||!data.location)return res.status(503).json({ready:false,environment,error:'Square credential or location verification failed',squareStatus:response.status});
+              const location=data.location;
+              const cardProcessing=location.status==='ACTIVE'&&location.capabilities?.includes('CREDIT_CARD_PROCESSING')===true;
+              const [hook,apple,verification]=await Promise.all([get(squareWebhookKey()),get(squareApplePayKey()),get(squareVerificationKey())]);
+              const webhookConfigured=Boolean(hook?.signature_key&&hook.enabled);
+              const ready=cardProcessing&&location.currency==='CAD'&&webhookConfigured;
+              return res.status(ready?200:503).json({
+                revision:'square-account-restore-2026-09-09',ready,environment,provider:'square',
+                currency:location.currency,cardProcessing,accountScope:squareAccountScope(),
+                applicationIdSuffix:process.env.SQUARE_APPLICATION_ID.slice(-6),locationIdSuffix:process.env.SQUARE_LOCATION_ID.slice(-6),
+                webhookConfigured,webhookId:hook?.id||null,
+                webhookTestStatus:verification?.squareDeliveryStatus??null,
+                invalidSignatureRejected:verification?.invalidSignatureRejected===true,
+                applePay:apple?.status||'NOT_REGISTERED'
+              });
+            }catch{return res.status(503).json({ready:false,environment,error:'Square verification unavailable'});}
+          }
+          """)
+          replace('api/stripe-health.js',
+              "checkoutProvider: process.env.PMP_LEGACY_CHECKOUT === '1' ? 'legacy' : 'stripe',",
+              "checkoutProvider: 'square',")
+          replace('test/stripe-cad.test.js',
+              "test('new customer checkouts default to Stripe CAD and preserve explicit rollback',()=>{const s=source('api/create-checkout.js');assert.ok(s.includes('process.env.PMP_LEGACY_CHECKOUT !== \"1\"'));assert.ok(s.includes('req.stripeCadMode = true'));});",
+              "test('new customer checkouts return to Square without deleting Stripe settlement',()=>{const s=source('api/create-checkout.js');assert.ok(s.includes('req.body?.payment_provider === \"square\"'));assert.ok(s.includes('req.stripeCadMode = false'));});")
+          Path('test/square-account-migration.test.js').write_text("""import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          import {squareAccountScope,activeSquare} from '../lib/square-bridge.js';
+          import {verify} from '../api/square-webhook.js';
+          import crypto from 'node:crypto';
+          const source=p=>readFileSync(new URL('../'+p,import.meta.url),'utf8');
+          test('webhook and Apple Pay caches are scoped to application and location',()=>{
+            const a={SQUARE_ENV:'production',SQUARE_APPLICATION_ID:'appA',SQUARE_LOCATION_ID:'locA'};
+            assert.equal(squareAccountScope(a),squareAccountScope({...a}));
+            for(const [key,value]of [['SQUARE_ENV','sandbox'],['SQUARE_APPLICATION_ID','appB'],['SQUARE_LOCATION_ID','locB']])assert.notEqual(squareAccountScope(a),squareAccountScope({...a,[key]:value}));
+          });
+          test('Square is active even if an obsolete Stripe flag remains',()=>{const old=process.env.CHECKOUT_PROVIDER;try{process.env.CHECKOUT_PROVIDER='stripe';assert.equal(activeSquare(),true);}finally{if(old===undefined)delete process.env.CHECKOUT_PROVIDER;else process.env.CHECKOUT_PROVIDER=old;}});
+          test('new webhook uses its account-scoped key, not the old environment override',()=>{const s=source('api/square-webhook.js');assert.ok(s.includes('get(squareWebhookKey())'));assert.ok(!s.includes('process.env.SQUARE_WEBHOOK_SIGNATURE_KEY'));assert.ok(s.includes('!validId(payment.reference_id)'));});
+          test('only a matching signing key validates a Square event',()=>{const raw='{"type":"pmp.configuration_probe"}';const key='test-key-not-a-credential';const url='https://pmp-stripe-bridge.vercel.app/api/square-webhook';const signature=crypto.createHmac('sha256',key).update(url+raw).digest('base64');assert.equal(verify(raw,signature,key),true);assert.equal(verify(raw,signature,'old-account-test-key'),false);assert.equal(verify(raw,'invalid',key),false);});
+          test('old account payment requests cannot be submitted to the new location',()=>{assert.ok(source('lib/square-bridge.js').includes('attempt.request.location_id!==process.env.SQUARE_LOCATION_ID'));});
+          """)
+          original=subprocess.check_output(['git','show','c6b556f294eb47b9d46803c321616ef4f6930aee:public/square-checkout.html'],text=True)
+          current=Path('public/square-checkout.html').read_text()
+          assert original.split('<style>',1)[1].split('</style>',1)[0]==current.split('<style>',1)[1].split('</style>',1)[0], 'Original Square CSS changed'
+          print('Square routing restored; original layout CSS unchanged; secrets remain server-side.')
+          # Reuse existing browser QA with Square endpoints. No card entry or payment confirmation.
+          s=Path('scripts/verify-stripe-cad.mjs').read_text()
+          s=s.replace("assert.equal(q.paymentProvider,'stripe');", "assert.equal(q.provider,'square');assert.match(q.sessionId,/^sq_[a-f0-9]{32}$/);")
+          s=s.replace('/api/stripe-checkout','/api/square-checkout')
+          s=s.replace("const cardInput=page.frameLocator('#card iframe').first().locator('input[autocomplete=\"cc-number\"]');\n   await cardInput.click({trial:true,timeout:30000});", "assert.ok(await page.locator('#card iframe').first().isVisible(),'Square secure frame visible');")
+          s=s.replace("const invalid=await api.post(bridge+'/api/square-checkout',{data:{action:'prepare',sessionId:q.sessionId,confirmedChargeMinor:0}});", "const invalid=await api.post(bridge+'/api/square-pay',{data:{sessionId:q.sessionId,confirmedChargeMinor:0}});")
+          s=s.replace('secure Stripe frame','secure Square frame').replace("results/stripe-","results/square-")
+          Path('scripts/verify-square-restored.mjs').write_text(s)
+          PY
+      - name: Run regression tests
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npm test
+      - name: Commit restoration atomically
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add api/create-checkout.js api/square-webhook.js api/square-health.js api/stripe-health.js lib/square-bridge.js test/stripe-cad.test.js test/square-account-migration.test.js scripts/verify-square-restored.mjs
+          git commit -m 'Restore Square CAD checkout and isolate new merchant webhook and Apple Pay caches'
+          git push origin HEAD:main
+      - name: Verify production deployment revision
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          let ok=false;
+          for(let i=0;i<36;i++){
+            try{
+              const r=await fetch('https://checkout.puremajestypet.com/api/square-health',{signal:AbortSignal.timeout(10000)});
+              const s=await r.json();
+              if(s.revision==='square-account-restore-2026-09-09'){
+                console.log('Production credentials check:',JSON.stringify(s));
+                if(!s.cardProcessing||s.currency!=='CAD')throw Error('New Square location cannot process CAD card payments');
+                ok=true;break;
+              }
+            }catch(e){if(String(e.message).includes('cannot process'))throw e;}
+            await new Promise(r=>setTimeout(r,5000));
+          }
+          if(!ok)throw Error('Restoration deployment not observed');
+          JS
+      - name: Install browser test tools
+        run: |
+          mkdir -p /tmp/pmp-qa
+          npm install --prefix /tmp/pmp-qa playwright --no-audit --no-fund
+          /tmp/pmp-qa/node_modules/.bin/playwright install --with-deps chromium
+      - name: Verify five currencies, secure form, discounts and webhook
+        run: |
+          node scripts/verify-square-restored.mjs
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          const r=await fetch('https://checkout.puremajestypet.com/api/square-health');
+          const s=await r.json();console.log('Final Square configuration:',JSON.stringify(s));
+          assert.equal(s.ready,true);assert.equal(s.webhookTestStatus,200);assert.equal(s.invalidSignatureRejected,true);assert.equal(s.applePay,'VERIFIED');
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: square-checkout-restoration-verification
+          path: /tmp/pmp-qa/results
+          if-no-files-found: ignore
