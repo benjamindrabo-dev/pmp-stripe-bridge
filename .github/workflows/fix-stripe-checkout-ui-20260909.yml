@@ -1,0 +1,225 @@
+name: Fix Stripe checkout wallet layout and duplicate name
+on:
+  push:
+    paths:
+      - '.github/workflows/fix-stripe-checkout-ui-20260909.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: stripe-checkout-ui-20260909
+  cancel-in-progress: false
+jobs:
+  checkout-ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply narrowly scoped Stripe UI corrections
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          p=Path('public/stripe-checkout.js')
+          s=p.read_text()
+          if 'wallet-layout-r1-20260909' in s:
+              raise RuntimeError('This one-time UI patch has already been applied.')
+          assert subprocess.check_output(['git','hash-object',str(p)],text=True).strip()=='14d0e2ea75432eb4b25f050845d6c4fb637c3df5', 'Checkout changed since review; stop for reconciliation.'
+          def replace(old,new):
+              global s
+              assert s.count(old)==1, 'Expected a single UI patch target: '+old[:100]
+              s=s.replace(old,new,1)
+          replace("const $=id=>document.getElementById(id);", """const $=id=>document.getElementById(id);
+          // Stripe owns the secure wallet layout; the old Square grid must not
+          // constrain its single iframe to one half-width grid column.
+          function prepareStripeLayout(){
+           $('cardholder')?.closest('.cardholder-field')?.remove();
+           const grid=document.querySelector('.wallet-grid');
+           grid.replaceChildren();
+           Object.assign(grid.style,{display:'block',width:'100%',minWidth:'0'});
+           document.documentElement.dataset.pmpStripeUi='wallet-layout-r1-20260909';
+           return grid;
+          }
+          function renderChargeSummary(){
+           const charge=$('charge');
+           const chargeCurrency=String(data.quote.chargeCurrency||'CAD').toUpperCase();
+           const sameCurrency=String(data.quote.displayCurrency).toUpperCase()===chargeCurrency;
+           charge.hidden=sameCurrency;
+           charge.textContent='';
+           if(sameCurrency)return;
+           // No redundant CAD sentence when the total is already in CAD. For
+           // foreign-currency display, keep the actual debit by the final total.
+           const labels={en:'Amount charged',fr:'Montant debite',de:'Belasteter Betrag',es:'Importe del cargo',it:'Importo addebitato',pt:'Montante debitado'};
+           const language=String(data.locale||'en').split('-')[0];
+           const amount=new Intl.NumberFormat(data.locale||'en',{style:'currency',currency:chargeCurrency,currencyDisplay:'code'}).format(data.quote.chargeMinor/100);
+           charge.textContent=(labels[language]||labels.en)+': '+amount;
+           document.querySelector('.pay-total').insertAdjacentElement('afterend',charge);
+          }
+          const stripeWalletGrid=prepareStripeLayout();""".replace('Montant debite','Montant débité'))
+          replace(" $('cardholder').required=false;\n",'')
+          replace("  const name=$('cardholder').value.trim()||billing.first_name+' '+billing.last_name;\n",'')
+          replace("billing_details:{name,email:$('email').value", "billing_details:{email:$('email').value")
+          replace("for(const id of ['cardholder','email'", "for(const id of ['email'")
+          replace("fields:{billingDetails:{name:'never',email:'never',address:'never'}}", "fields:{billingDetails:{name:'auto',email:'never',address:'never'}}")
+          replace(" restoreDraft();$('cardholder').required=false;showSuggestions();", " restoreDraft();showSuggestions();")
+          replace(" $('charge').textContent=t.charge.replace('{cad}',(data.quote.chargeMinor/100).toFixed(2));$('back').href", " renderChargeSummary();$('back').href")
+          replace(" const grid=document.querySelector('.wallet-grid');grid.replaceChildren();", " const grid=stripeWalletGrid;")
+          p.write_text(s)
+          # Adapt the existing smoke check: same-currency debit prose is redundant.
+          p=Path('scripts/verify-stripe-cad.mjs');q=p.read_text()
+          old="assert.ok((await page.locator('#charge').innerText()).includes('CAD'),country+' CAD disclosure');"
+          assert q.count(old)==1
+          q=q.replace(old,"if(expected==='CAD')assert.equal(await page.locator('#charge').isVisible(),false,'No redundant CAD notice');else assert.ok((await page.locator('#charge').innerText()).includes('CAD'),country+' actual CAD debit disclosure');")
+          p.write_text(q)
+          PY
+      - name: Add focused UI regression tests
+        run: |
+          cat > test/stripe-checkout-ui.test.js <<'JS'
+          import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          import vm from 'node:vm';
+          const source=readFileSync(new URL('../public/stripe-checkout.js',import.meta.url),'utf8');
+          function getFunction(name,context){
+            const match=source.match(new RegExp('function '+name+'\\(\\)\\{[\\s\\S]*?\\n\\}'));
+            assert.ok(match,name+' exists');return vm.runInNewContext('('+match[0]+')',context);
+          }
+          test('Stripe wallet iframe has the full row and obsolete cardholder field is removed',()=>{
+            let removed=0,cleared=0;
+            const grid={style:{},replaceChildren(){cleared++;}};
+            const doc={documentElement:{dataset:{}},querySelector(selector){assert.equal(selector,'.wallet-grid');return grid;}};
+            const $=id=>{assert.equal(id,'cardholder');return {closest(selector){assert.equal(selector,'.cardholder-field');return {remove(){removed++;}};}};};
+            assert.equal(getFunction('prepareStripeLayout',{$,document:doc})(),grid);
+            assert.equal(removed,1);assert.equal(cleared,1);assert.equal(grid.style.display,'block');assert.equal(grid.style.width,'100%');assert.equal(grid.style.minWidth,'0');
+          });
+          test('CAD notice disappears only when totals already show the charge currency',()=>{
+            for(const [currency,locale]of [['CAD','en'],['CAD','fr'],['USD','en'],['EUR','fr'],['GBP','en'],['AUD','en']]){
+              const charge={};let placed=0;
+              const document={querySelector(selector){assert.equal(selector,'.pay-total');return {insertAdjacentElement(position,element){assert.equal(position,'afterend');assert.equal(element,charge);placed++;}};}};
+              getFunction('renderChargeSummary',{document,$:id=>{assert.equal(id,'charge');return charge;},Intl,data:{locale,quote:{displayCurrency:currency,chargeCurrency:'CAD',chargeMinor:94500}}})();
+              assert.equal(charge.hidden,currency==='CAD');assert.equal(placed,currency==='CAD'?0:1);
+              if(currency==='CAD')assert.equal(charge.textContent,'');else{assert.match(charge.textContent,/CAD/);assert.doesNotMatch(charge.textContent,/Your card will be charged/);}
+            }
+          });
+          test('the secure Payment Element owns the name and no removed input is read during confirmation',()=>{
+            assert.match(source,/name:'auto',email:'never',address:'never'/);
+            assert.doesNotMatch(source,/\$\('cardholder'\)\.(?:value|required)/);
+            assert.doesNotMatch(source,/billing_details:\{name,/);
+            assert.match(source,/billing_details:\{email:/);
+            assert.match(source,/elements\.submit\(\)/);
+            assert.match(source,/stripeClient\.confirmPayment/);
+            assert.match(source,/currency:'cad',amount:data\.quote\.chargeMinor/);
+          });
+          JS
+          npm install --ignore-scripts --no-audit --no-fund
+          mkdir -p /tmp/pmp-ui-results
+          npm test > /tmp/pmp-ui-results/regression.log 2>&1 || { tail -n 100 /tmp/pmp-ui-results/regression.log; exit 1; }
+          tail -n 12 /tmp/pmp-ui-results/regression.log
+          node --check public/stripe-checkout.js
+      - name: Install browser verification
+        run: |
+          mkdir -p /tmp/pmp-ui
+          npm install --prefix /tmp/pmp-ui playwright --no-audit --no-fund
+          /tmp/pmp-ui/node_modules/.bin/playwright install --with-deps chromium > /tmp/pmp-ui-browser-install.log 2>&1 || { tail -n 40 /tmp/pmp-ui-browser-install.log; exit 1; }
+      - name: Prepare no-payment browser checks
+        run: |
+          cat > scripts/verify-stripe-checkout-ui.mjs <<'JS'
+          import assert from 'node:assert/strict';
+          import {readFileSync,writeFileSync,mkdirSync} from 'node:fs';
+          import {createRequire} from 'node:module';
+          const require=createRequire('/tmp/pmp-ui/package.json');
+          const {chromium,request}=require('playwright');
+          const patch=readFileSync(new URL('../public/stripe-checkout.js',import.meta.url),'utf8');
+          const preview=process.argv.includes('--preview');
+          const bridge='https://checkout.puremajestypet.com';
+          const store='https://www.puremajestypet.com';
+          const out='/tmp/pmp-ui-results/'+(preview?'before-publication':'production');mkdirSync(out,{recursive:true});
+          const api=await request.newContext({timeout:30000});
+          const browser=await chromium.launch({headless:true});
+          const results=[];
+          try{
+            const health=await (await api.get(bridge+'/api/stripe-health')).json();
+            assert.equal(health.checkoutProvider,'stripe');assert.equal(health.serverReady,true);
+            const products=await (await api.get(store+'/en-ca/products.json?limit=100')).json();
+            const product=products.products.find(p=>/collagen/i.test(p.title)&&p.variants.some(v=>v.available!==false));assert.ok(product);
+            for(const [country,root,currency,locale,width]of [['CA','/en-ca','CAD','en',390],['US','','USD','en',390],['FR','/fr-fr','EUR','fr',390],['GB','/en-gb','GBP','en',1280],['AU','/en-au','AUD','en',1280]]){
+              const client=await request.newContext({timeout:30000});
+              let page;
+              try{
+                const cart=await (await client.get(store+root+'/cart.js')).json();assert.equal(cart.currency,currency);
+                const p=await (await client.get(store+root+'/products/'+product.handle+'.js')).json();const v=p.variants.find(v=>v.available)||p.variants[0];
+                const r=await api.post(bridge+'/api/create-checkout',{data:{payment_provider:'square',items:[{variant_id:v.id,product_id:p.id,title:p.title,quantity:1,price_cents:v.price,image:p.featured_image}],currency,checkout_country:country,locale,shopify_cart_url:store+root+'/cart',note:'UI-only verification; no payment',marketing_allowed:false}});
+                const q=await r.json();assert.ok(r.ok());assert.equal(q.paymentProvider,'stripe');
+                const details=await (await api.get(bridge+'/api/stripe-checkout?session_id='+q.sessionId)).json();assert.equal(details.quote.displayCurrency,currency);assert.equal(details.quote.chargeCurrency,'CAD');
+                page=await browser.newPage({viewport:{width,height:950}});
+                let paymentAttempts=0;const errors=[];page.on('pageerror',e=>errors.push(e.message));
+                await page.route('**/api/stripe-checkout',async route=>{
+                  const req=route.request();let data;try{data=req.postDataJSON();}catch{}
+                  if(req.method()==='POST'&&data?.action==='prepare'){paymentAttempts++;await route.fulfill({status:409,contentType:'application/json',body:'{"error":"Payment disabled in UI verification"}'});return;}
+                  await route.continue();
+                });
+                if(preview)await page.route('**/stripe-checkout.js',route=>route.fulfill({status:200,contentType:'application/javascript',body:patch}));
+                await page.goto(q.checkoutUrl,{waitUntil:'domcontentloaded'});
+                await page.waitForFunction(()=>document.documentElement.dataset.pmpStripeUi==='wallet-layout-r1-20260909'&&!document.getElementById('pay').disabled,null,{timeout:45000});
+                await page.waitForTimeout(1500);
+                assert.equal(await page.locator('#cardholder').count(),0);
+                assert.equal(await page.locator('.cardholder-field').count(),0);
+                assert.ok(await page.locator('#card iframe').count()>0);
+                assert.ok((await page.locator('#pay-total').innerText()).includes(currency));
+                if(currency==='CAD')assert.equal(await page.locator('#charge').isVisible(),false);
+                else {assert.equal(await page.locator('#charge').isVisible(),true);assert.ok((await page.locator('#charge').innerText()).includes('CAD'));}
+                const dimensions=[];
+                for(const size of country==='CA'?[320,390,430,768,1280]:[width]){
+                  await page.setViewportSize({width:size,height:950});await page.waitForTimeout(350);
+                  const d=await page.locator('.wallet-grid').evaluate(el=>{
+                    const r=el.getBoundingClientRect(),child=el.firstElementChild?.getBoundingClientRect();return {layout:getComputedStyle(el).display,width:r.width,childWidth:child?.width||0,visible:!!r.height,overflow:document.documentElement.scrollWidth>innerWidth+1};
+                  });
+                  assert.equal(d.layout,'block');assert.equal(d.overflow,false);
+                  if(d.visible&&d.childWidth)assert.ok(d.childWidth>=d.width-2,'Stripe iframe must span the full wallet row');
+                  dimensions.push({viewport:size,...d});
+                }
+                await page.setViewportSize({width,height:950});await page.waitForTimeout(500);
+                await page.screenshot({path:out+'/checkout-'+currency+'.png',fullPage:true});
+                if(country==='CA')await page.screenshot({path:out+'/checkout-CAD-top.png',fullPage:false});
+                assert.equal(paymentAttempts,0);assert.equal(errors.length,0,errors.join(' | '));
+                results.push({country,displayCurrency:currency,chargeCurrency:details.quote.chargeCurrency,duplicateNameRemoved:true,chargeNoticeHidden:currency==='CAD',dimensions,noCardDataEntered:true,noPaymentAttempted:true});
+              }finally{if(page)await page.close();await client.dispose();}
+            }
+            writeFileSync(out+'/report.json',JSON.stringify(results,null,2));
+            console.log(JSON.stringify({mode:preview?'before-publication':'production',passed:results.length,results}));
+          }finally{await browser.close();await api.dispose();}
+          JS
+      - name: Verify updated script against real checkout before publication
+        run: node scripts/verify-stripe-checkout-ui.mjs --preview
+      - name: Publish only the verified UI and tests
+        run: |
+          git diff -- public/stripe-checkout.js scripts/verify-stripe-cad.mjs > /tmp/pmp-ui-results/ui.patch
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add public/stripe-checkout.js scripts/verify-stripe-cad.mjs test/stripe-checkout-ui.test.js scripts/verify-stripe-checkout-ui.mjs
+          git commit -m 'Fix full-width Stripe express wallets, remove duplicate name, simplify same-currency totals'
+          git push origin HEAD:main
+      - name: Wait for production UI revision
+        run: |
+          node --input-type=module <<'JS'
+          let ready=false;
+          for(let i=0;i<40;i++){
+            try{const r=await fetch('https://checkout.puremajestypet.com/stripe-checkout.js',{cache:'no-store',signal:AbortSignal.timeout(10000)});if(r.ok&&(await r.text()).includes('wallet-layout-r1-20260909')){ready=true;break;}}catch{}
+            await new Promise(r=>setTimeout(r,5000));
+          }
+          if(!ready)throw Error('New UI revision not observed in production');
+          JS
+      - name: Verify actual production checkout without card entry or payment
+        run: node scripts/verify-stripe-checkout-ui.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stripe-checkout-ui-alignment-verification
+          path: /tmp/pmp-ui-results
+          if-no-files-found: ignore
