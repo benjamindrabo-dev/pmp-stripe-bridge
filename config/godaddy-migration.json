@@ -1,0 +1,38 @@
+{
+  "project": "pmp-stripe-bridge",
+  "repository": "benjamindrabo-dev/pmp-stripe-bridge",
+  "preparationDate": "2026-09-09",
+  "provider": "godaddy",
+  "method": "poynt-one-time-paylinks",
+  "state": "prepared-not-connected",
+  "enabled": false,
+  "reviewApprovalRecorded": false,
+  "realMerchantCredentialsConfigured": false,
+  "accountApiAccessVerified": false,
+  "storefrontRoutingImplemented": false,
+  "shopifyOrderSynchronizationImplemented": false,
+  "readyToMigrate": false,
+  "existingCheckoutChanged": false,
+  "proposedChargeCurrency": "CAD",
+  "chargeCurrencyMustMatchMerchantStore": true,
+  "checkoutOrigin": "https://checkout.puremajestypet.com",
+  "plannedWebhookUrl": "https://pmp-stripe-bridge.vercel.app/api/godaddy-webhook",
+  "webhookEndpointDeployed": false,
+  "localValidation": {
+    "command": "node --test test/godaddy-payments.test.js",
+    "tests": 44,
+    "passed": 44,
+    "failed": 0,
+    "network": "mocked",
+    "realPayments": 0
+  },
+  "activationRequirements": [
+    "Actual GoDaddy review acceptance recorded by the merchant",
+    "Real GoDaddy/Poynt merchant IDs and API app authorization configured securely",
+    "Read-only API preflight succeeds for the actual merchant and currency",
+    "Server-side quote, contact/address capture and durable intent storage are wired",
+    "Webhook receiver, queue, duplicate handling and Shopify order writer are wired",
+    "End-to-end tests validate totals, addresses, stock, emails and attribution",
+    "Explicit merchant instruction to activate production routing"
+  ]
+}
