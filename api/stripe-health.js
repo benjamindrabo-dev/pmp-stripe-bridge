@@ -55,8 +55,8 @@ export default async function handler(req, res) {
   const signingSecret = process.env.STRIPE_WEBHOOK_SECRET || '';
   const publicKey = process.env.STRIPE_PUBLISHABLE_KEY || (await import('../lib/stripe-cad-bridge.js')).PUBLIC_KEY;
   const report = {
-    revision: 'pmp-stripe-cad-live-2026-09-09',
-    checkoutProvider: 'square',
+    revision: 'pmp-stripe-reactivated-square-layout-2026-09-09',
+    checkoutProvider: 'stripe',
     chargeCurrency: 'CAD',
     displayCurrency: 'shopify_market',
     serverKeyConfigured: /^(sk|rk)_live_/.test(secret),
@@ -72,14 +72,21 @@ export default async function handler(req, res) {
         const [account, webhook] = await Promise.all([
           stripeGet('account', secret), stripeGet('webhook_endpoints/' + WEBHOOK_ID, secret),
         ]);
-        cached = { at: Date.now(), account, webhook };
+        // Domain lookup is read-only and cannot block card readiness on a permissions error.
+        const domains = account.id === EXPECTED_ACCOUNT ? await stripeGet('payment_method_domains?domain_name=checkout.puremajestypet.com&limit=100', secret).catch(() => null) : null;
+        cached = { at: Date.now(), account, webhook, walletDomainChecked: domains !== null,
+          walletDomain: domains?.data?.find(d => d.domain_name === 'checkout.puremajestypet.com' && d.livemode === true) || null };
       }
       report.accountMatches = cached.account.id === EXPECTED_ACCOUNT;
+      report.wallets = { domain: 'checkout.puremajestypet.com', checked: cached.walletDomainChecked,
+        registered: Boolean(cached.walletDomain), enabled: cached.walletDomain?.enabled === true,
+        applePay: cached.walletDomain?.apple_pay?.status || 'not_verified',
+        googlePay: cached.walletDomain?.google_pay?.status || 'not_verified' };
       report.chargesEnabled = cached.account.charges_enabled === true;
       report.payoutsEnabled = cached.account.payouts_enabled === true;
       report.webhookRegistered = cached.webhook.status === 'enabled' && cached.webhook.livemode === true &&
         cached.webhook.url === WEBHOOK_URL &&
-        ['checkout.session.completed', 'checkout.session.async_payment_succeeded'].every(e => cached.webhook.enabled_events?.includes(e));
+        ['checkout.session.completed', 'checkout.session.async_payment_succeeded', 'payment_intent.succeeded'].every(e => cached.webhook.enabled_events?.includes(e));
     }
     const wantsProbe = new URL(req.url, 'https://pmp-stripe-bridge.vercel.app').searchParams.get('probe') === '1';
     if (wantsProbe && report.accountMatches && report.webhookSecretMatches && report.webhookRegistered) {
