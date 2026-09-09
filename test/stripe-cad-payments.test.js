@@ -7,7 +7,7 @@ function fixture(t,{lostResponse=false}={}){
  const env={...process.env};
  Object.assign(process.env,{STRIPE_SECRET_KEY:'sk_live_mock_for_offline_test',UPSTASH_REDIS_REST_URL:'https://redis.invalid',UPSTASH_REDIS_REST_TOKEN:'test',SHOPIFY_STORE_DOMAIN:'test.myshopify.com',SHOPIFY_ADMIN_TOKEN:'test'});
  delete process.env.GA4_API_SECRET;delete process.env.META_CAPI_TOKEN;delete process.env.META_PIXEL_ID;
- const cart={id,provider:'stripe',displayCurrency:'USD',scale:100,total:2899,subtotal:2899,shippingDisplay:0,items:[{variant_id:123,title:'Product',quantity:1,price_cents:2899,original_price_cents:2899}],attribution:{},country:'US',quote:{displayCurrency:'USD',displayAmount:'28.99',chargeCurrency:'CAD',chargeMinor:4000,displayUnitsPerCad:'0.72475',expiresAt:new Date(Date.now()+1800000).toISOString()}};
+ const cart={id,provider:'stripe',displayCurrency:'USD',scale:100,total:2899,subtotal:2899,shippingDisplay:0,items:[{variant_id:123,title:'Product',quantity:1,price_cents:2899,original_price_cents:2899}],attribution:{},country:'US',quote:{version:1,createdAt:new Date(Date.now()-1000).toISOString(),displayCurrency:'USD',displayAmount:'28.99',chargeCurrency:'CAD',chargeMinor:4000,displayUnitsPerCad:'0.72475',expiresAt:new Date(Date.now()+1800000).toISOString()}};
  const db=new Map([['sess:'+id,JSON.stringify(cart)]]),intents=new Map(),counts={created:0,orders:0,posts:0};
  let existingOrder=null,shouldLose=lostResponse;
  const ok=x=>new Response(JSON.stringify(x),{status:200,headers:{'Content-Type':'application/json'}});
