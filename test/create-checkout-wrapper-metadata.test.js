@@ -140,6 +140,6 @@ test("production campaign wrapper stays at Stripe's 50-key metadata limit", asyn
   assert.equal(metadataKeys.length, 50);
   assert.equal(stripeParams.get("metadata[automatic_offer]"), "WELCOME20");
   assert.equal(stripeParams.get("metadata[automatic_offer_source]"), "meta_liquid_retargeting");
-  assert.equal(stripeParams.get("discounts[0][promotion_code]"), "promo_1U6IEuA0auDoBNzsRt1kuqge");
+  assert.equal(stripeParams.get("discounts[0][promotion_code]"), "promo_1UDccgPw2Aen0E79qBO3wtV4");
   assert.equal(stripeParams.get("allow_promotion_codes"), null);
 });

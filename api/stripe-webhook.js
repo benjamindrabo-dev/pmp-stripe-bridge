@@ -1196,6 +1196,11 @@ export default async function handler(req, res) {
   try { event = JSON.parse(raw); } catch { return res.status(400).end(); }
 
   try {
+    if(event.type === 'payment_intent.succeeded' && event.data?.object?.metadata?.pmp_provider === 'stripe_cad') {
+      const {settleStripePayment}=await import('../lib/stripe-cad-bridge.js');
+      await settleStripePayment(event.data.object.id,event.created);
+      return res.status(200).json({received:true});
+    }
     // async_payment_succeeded covers delayed methods (bank debits etc.) that
     // confirm after the session completes.
     if (event.type === "checkout.session.completed" || event.type === "checkout.session.async_payment_succeeded") {

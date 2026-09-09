@@ -65,6 +65,10 @@ export default async function handler(req, res) {
   if (req.method !== "GET") return res.status(405).json({ error: "Method not allowed" });
 
   const id = (req.query && req.query.session_id) || "";
+  if (/^st_[a-f0-9]{32}$/.test(id)) {
+    try { const {stripeStatus}=await import('../lib/stripe-cad-bridge.js');return res.status(200).json(await stripeStatus(id)); }
+    catch {return res.status(503).json({error:'Payment verification unavailable'});}
+  }
   if (validId(id)) {
     res.setHeader("Cache-Control", "no-store");
     try {

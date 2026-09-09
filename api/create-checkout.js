@@ -8,7 +8,7 @@ const META_OFFER = Object.freeze({
   source: "meta",
   medium: "paid_social",
   campaign: "liquid_retargeting_product_view",
-  promotionCodeId: "promo_1U6IEuA0auDoBNzsRt1kuqge", // Stripe WELCOME20 (20% once)
+  promotionCodeId: "promo_1UDccgPw2Aen0E79qBO3wtV4", // Stripe WELCOME20 (20% once)
 });
 
 const requestScope = new AsyncLocalStorage();
@@ -53,6 +53,7 @@ globalThis.fetch = async function pmpCampaignAwareFetch(input, init) {
 };
 
 export default async function handler(req, res) {
+  if (req.body?.payment_provider === "stripe_cad_preview") { req.squareMode = true; req.stripeCadMode = true; return baseHandler(req,res); }
   if (req.body?.payment_provider === 'square') {
     req.squareMode = true;
     return baseHandler(req,res);

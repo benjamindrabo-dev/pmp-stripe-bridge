@@ -43,6 +43,12 @@
     },
     "api/session-status.js": {
       "maxDuration": 60
+    },
+    "api/stripe-checkout.js": {
+      "maxDuration": 60
+    },
+    "api/stripe-webhook.js": {
+      "maxDuration": 60
     }
   },
   "crons": [

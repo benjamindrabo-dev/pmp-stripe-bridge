@@ -1120,7 +1120,7 @@ const JS = String.raw`(function(){
 
     // Confirm the Square purchase before firing browser conversions or clearing the cart.
     var squareSession = new URL(location.href).searchParams.get('session_id');
-    if (/^sq_[a-f0-9]{32}$/.test(squareSession || '')) {
+    if (/^(?:sq|st)_[a-f0-9]{32}$/.test(squareSession || '')) {
       nativeFetch('https://pmp-stripe-bridge.vercel.app/api/session-status?session_id='+encodeURIComponent(squareSession),{cache:'no-store'}).then(function(r){return r.json();}).then(function(s){
         if(!s.paid || !s.orderId)return;
         var key='pmp:square-purchase:'+squareSession;
