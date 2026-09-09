@@ -1,0 +1,141 @@
+name: Reactivate Stripe with existing Square layout
+on:
+  push:
+    paths:
+      - '.github/workflows/reactivate-stripe-square-layout.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: pmp-checkout-provider-deployment
+  cancel-in-progress: false
+jobs:
+  reactivate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Restore Stripe routing without changing the checkout page
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          def replace(path, old, new):
+              p=Path(path); text=p.read_text()
+              if new in text and old not in text: return
+              if text.count(old)!=1: raise RuntimeError('Unexpected source revision: '+path)
+              p.write_text(text.replace(old,new,1))
+          page=Path('public/square-checkout.html')
+          before=hashlib.sha256(page.read_bytes()).hexdigest()
+          replace('api/create-checkout.js',
+              '// Square restored for the storefront; legacy Stripe settlement endpoints remain available.',
+              '// Stripe reactivated for new storefront checkouts; existing Square sessions keep their own settlement endpoints.')
+          replace('api/create-checkout.js',
+              'if (req.body?.payment_provider === "square" || process.env.PMP_LEGACY_CHECKOUT !== "1") { req.squareMode = true; req.stripeCadMode = false; return baseHandler(req,res); }',
+              'if (req.body?.payment_provider === "square" || req.body?.payment_provider === "stripe_cad_preview" || process.env.PMP_LEGACY_CHECKOUT !== "1") { req.squareMode = true; req.stripeCadMode = true; return baseHandler(req,res); }')
+          replace('api/stripe-health.js',
+              "revision: 'pmp-stripe-cad-live-2026-09-09',",
+              "revision: 'pmp-stripe-reactivated-square-layout-2026-09-09',")
+          replace('api/stripe-health.js',"checkoutProvider: 'square',","checkoutProvider: 'stripe',")
+          replace('api/stripe-health.js',
+              "['checkout.session.completed', 'checkout.session.async_payment_succeeded'].every",
+              "['checkout.session.completed', 'checkout.session.async_payment_succeeded', 'payment_intent.succeeded'].every")
+          replace('api/stripe-health.js',
+              'cached = { at: Date.now(), account, webhook };',
+              """// Domain lookup is read-only and cannot block card readiness on a permissions error.
+                  const domains = account.id === EXPECTED_ACCOUNT ? await stripeGet('payment_method_domains?domain_name=checkout.puremajestypet.com&limit=100', secret).catch(() => null) : null;
+                  cached = { at: Date.now(), account, webhook, walletDomainChecked: domains !== null,
+                    walletDomain: domains?.data?.find(d => d.domain_name === 'checkout.puremajestypet.com' && d.livemode === true) || null };""")
+          replace('api/stripe-health.js',
+              'report.accountMatches = cached.account.id === EXPECTED_ACCOUNT;',
+              """report.accountMatches = cached.account.id === EXPECTED_ACCOUNT;
+                report.wallets = { domain: 'checkout.puremajestypet.com', checked: cached.walletDomainChecked,
+                  registered: Boolean(cached.walletDomain), enabled: cached.walletDomain?.enabled === true,
+                  applePay: cached.walletDomain?.apple_pay?.status || 'not_verified',
+                  googlePay: cached.walletDomain?.google_pay?.status || 'not_verified' };""")
+          replace('test/stripe-cad.test.js',
+              "test('new customer checkouts return to Square without deleting Stripe settlement',()=>{const s=source('api/create-checkout.js');assert.ok(s.includes('req.body?.payment_provider === \"square\"'));assert.ok(s.includes('req.stripeCadMode = false'));});",
+              "test('new customer checkouts use Stripe CAD without deleting Square settlement',()=>{const s=source('api/create-checkout.js');assert.ok(s.includes('req.body?.payment_provider === \"square\"'));assert.ok(s.includes('req.stripeCadMode = true'));});")
+          Path('test/stripe-reactivation-routing.test.js').write_text('''import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import {readFileSync} from 'node:fs';
+          import vm from 'node:vm';
+          const source=readFileSync(new URL('../api/create-checkout.js',import.meta.url),'utf8');
+          const handlerSource=source.slice(source.indexOf('export default async function handler')).replace('export default async function handler','async function handler');
+          for(const flag of [undefined,'1','0']) test('storefront Square payload routes to Stripe CAD with legacy flag '+flag,async()=>{
+            const handler=vm.runInNewContext(handlerSource+'; handler',{
+              process:{env:{PMP_LEGACY_CHECKOUT:flag}},
+              baseHandler:async req=>({squareMode:req.squareMode,stripeCadMode:req.stripeCadMode}),
+              qualifiesForMetaOffer:()=>false,requestScope:{run:(_,fn)=>fn()}
+            });
+            const result=await handler({body:{payment_provider:'square'}},{});
+            assert.equal(result.squareMode,true);assert.equal(result.stripeCadMode,true);
+          });
+          test('Stripe status requires PaymentIntent completion and exposes only wallet statuses',()=>{
+            const health=readFileSync(new URL('../api/stripe-health.js',import.meta.url),'utf8');
+            assert.ok(health.includes("checkoutProvider: 'stripe'"));
+            assert.ok(health.includes("'payment_intent.succeeded'].every"));
+            assert.ok(health.includes('report.wallets ='));
+          });
+          ''')
+          assert hashlib.sha256(page.read_bytes()).hexdigest()==before, 'Checkout HTML or CSS changed'
+          print('Existing checkout HTML/CSS preserved byte-for-byte; new storefront routing is Stripe CAD.')
+          PY
+      - name: Run all regression tests
+        shell: bash
+        run: |
+          mkdir -p /tmp/pmp-qa/results
+          npm install --ignore-scripts --no-audit --no-fund
+          npm test > /tmp/pmp-qa/results/regression.log 2>&1 || { tail -n 100 /tmp/pmp-qa/results/regression.log; exit 1; }
+          tail -n 12 /tmp/pmp-qa/results/regression.log
+      - name: Commit tested routing and health changes
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add api/create-checkout.js api/stripe-health.js test/stripe-cad.test.js test/stripe-reactivation-routing.test.js
+          if ! git diff --cached --quiet; then
+            git commit -m 'Reactivate Stripe CAD on the existing checkout while preserving Square settlement'
+            git push origin HEAD:main
+          fi
+      - name: Verify deployment and Stripe webhook readiness
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {writeFileSync} from 'node:fs';
+          let final;
+          for(let i=0;i<48;i++){
+            try{
+              const r=await fetch('https://checkout.puremajestypet.com/api/stripe-health?probe=1',{signal:AbortSignal.timeout(15000)});
+              const s=await r.json();
+              if(s.revision==='pmp-stripe-reactivated-square-layout-2026-09-09'){final=s;break;}
+            }catch{}
+            await new Promise(r=>setTimeout(r,5000));
+          }
+          assert.ok(final,'Reactivated production deployment not observed');
+          console.log('Stripe production verification:',JSON.stringify(final));
+          writeFileSync('/tmp/pmp-qa/results/stripe-health.json',JSON.stringify(final,null,2));
+          assert.equal(final.checkoutProvider,'stripe');assert.equal(final.serverReady,true);
+          assert.equal(final.accountMatches,true);assert.equal(final.chargesEnabled,true);
+          assert.equal(final.signatureProbe.validSignatureAccepted,true);assert.equal(final.signatureProbe.invalidSignatureRejected,true);
+          JS
+      - name: Prepare browser verification
+        shell: bash
+        run: |
+          npm install --prefix /tmp/pmp-qa playwright --no-audit --no-fund
+          /tmp/pmp-qa/node_modules/.bin/playwright install --with-deps chromium > /tmp/stripe-browser-install.log 2>&1 || { tail -n 40 /tmp/stripe-browser-install.log; exit 1; }
+      - name: Verify five currencies, secure Stripe fields and promotions without payment
+        run: node scripts/verify-stripe-cad.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stripe-reactivation-verification
+          path: /tmp/pmp-qa/results
+          if-no-files-found: ignore
