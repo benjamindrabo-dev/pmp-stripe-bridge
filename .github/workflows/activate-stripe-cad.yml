@@ -1,0 +1,52 @@
+name: Activate verified Stripe CAD checkout
+on:
+  push:
+    paths: [.github/workflows/activate-stripe-cad.yml]
+permissions:
+  contents: write
+jobs:
+  activate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply reversible checkout routing
+        run: python3 scripts/activate-stripe-cad.py
+      - name: Verify syntax and all regression tests
+        run: |
+          node --check api/create-checkout.js
+          node --check public/stripe-checkout.js
+          node --test
+      - name: Publish the tested changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add api public scripts/verify-stripe-cad.mjs test
+          git commit -m 'Activate Stripe CAD payments while retaining local currency and existing checkout layout'
+          git push
+      - name: Wait for production activation
+        run: |
+          for i in $(seq 1 45); do
+            if curl -fsS https://pmp-stripe-bridge.vercel.app/api/stripe-health | grep -q 'pmp-stripe-cad-live-2026-09-09'; then exit 0; fi
+            sleep 4
+          done
+          exit 1
+      - name: Install browser checks
+        run: |
+          mkdir -p /tmp/pmp-qa
+          cd /tmp/pmp-qa
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+      - name: Verify live customer flow without submitting card data
+        run: node scripts/verify-stripe-cad.mjs
+      - name: Save verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stripe-cad-live-verification
+          path: /tmp/pmp-qa/results
+          retention-days: 3
