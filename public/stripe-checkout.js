@@ -2,6 +2,32 @@
 'use strict';
 document.addEventListener('securitypolicyviolation',e=>{let url=e.blockedURI;try{const u=new URL(url);url=u.origin+u.pathname;}catch{}console.warn('Payment CSP blocked:',e.effectiveDirective,url);});
 const $=id=>document.getElementById(id);
+// Stripe owns the secure wallet layout; the old Square grid must not
+// constrain its single iframe to one half-width grid column.
+function prepareStripeLayout(){
+ $('cardholder')?.closest('.cardholder-field')?.remove();
+ const grid=document.querySelector('.wallet-grid');
+ grid.replaceChildren();
+ Object.assign(grid.style,{display:'block',width:'100%',minWidth:'0'});
+ document.documentElement.dataset.pmpStripeUi='wallet-layout-r1-20260909';
+ return grid;
+}
+function renderChargeSummary(){
+ const charge=$('charge');
+ const chargeCurrency=String(data.quote.chargeCurrency||'CAD').toUpperCase();
+ const sameCurrency=String(data.quote.displayCurrency).toUpperCase()===chargeCurrency;
+ charge.hidden=sameCurrency;
+ charge.textContent='';
+ if(sameCurrency)return;
+ // No redundant CAD sentence when the total is already in CAD. For
+ // foreign-currency display, keep the actual debit by the final total.
+ const labels={en:'Amount charged',fr:'Montant débité',de:'Belasteter Betrag',es:'Importe del cargo',it:'Importo addebitato',pt:'Montante debitado'};
+ const language=String(data.locale||'en').split('-')[0];
+ const amount=new Intl.NumberFormat(data.locale||'en',{style:'currency',currency:chargeCurrency,currencyDisplay:'code'}).format(data.quote.chargeMinor/100);
+ charge.textContent=(labels[language]||labels.en)+': '+amount;
+ document.querySelector('.pay-total').insertAdjacentElement('afterend',charge);
+}
+const stripeWalletGrid=prepareStripeLayout();
 const walletMethods={};let selectedMethod='card',stripeClient,elements;
 let sessionId=new URL(location.href).searchParams.get('session_id'), data, card, payments, busy=false;
 const text={
@@ -30,7 +56,6 @@ function trackStage(stage){
 $('checkout-form').addEventListener('input',e=>{if(['email','first','last','address','city','zip'].includes(e.target.id)&&e.target.value)trackStage('details_started');});
 async function submit(walletEvent){
  if(busy)return;
- $('cardholder').required=false;
  if(!valid()){if(walletEvent)walletEvent.paymentFailed({reason:'fail'});return;}
  if(Date.now()>=Date.parse(data.quote.expiresAt)){$('status').textContent=t.expired;if(walletEvent)walletEvent.paymentFailed({reason:'fail'});return;}
  setBusy(true);$('status').className='';$('status').textContent=t.processing;
@@ -42,8 +67,7 @@ async function submit(walletEvent){
   if(result.pending){$('status').textContent=t.pending;await poll();return;}
   if(result.currency!=='CAD'||result.amount!==data.quote.chargeMinor)throw Error('Payment amount changed. Please refresh.');
   trackStage('payment_info_added');
-  const name=$('cardholder').value.trim()||billing.first_name+' '+billing.last_name;
-  const confirmed=await stripeClient.confirmPayment({elements,clientSecret:result.clientSecret,confirmParams:{return_url:location.origin+'/square-checkout.html?session_id='+sessionId,payment_method_data:{billing_details:{name,email:$('email').value,address:{line1:billing.address_line_1,line2:billing.address_line_2,city:billing.locality,state:billing.administrative_district_level_1,postal_code:billing.postal_code,country:billing.country}}}},redirect:'if_required'});
+  const confirmed=await stripeClient.confirmPayment({elements,clientSecret:result.clientSecret,confirmParams:{return_url:location.origin+'/square-checkout.html?session_id='+sessionId,payment_method_data:{billing_details:{email:$('email').value,address:{line1:billing.address_line_1,line2:billing.address_line_2,city:billing.locality,state:billing.administrative_district_level_1,postal_code:billing.postal_code,country:billing.country}}}},redirect:'if_required'});
   if(confirmed.error)throw Error(confirmed.error.message);
   $('status').textContent=t.pending;
   if(await poll())return;
@@ -51,7 +75,7 @@ async function submit(walletEvent){
  }catch(e){if(walletEvent)walletEvent.paymentFailed({reason:'fail'});$('status').className='error';$('status').textContent=e.message;setBusy(false);}
 }
 function extra(){const lang=String(data?.locale||'en').split('-')[0];return ({fr:{title:'Complétez votre commande',add:'Ajouter',remove:'Retirer',updating:'Mise à jour du total…'},de:{title:'Bestellung ergänzen',add:'Hinzufügen',remove:'Entfernen',updating:'Gesamtbetrag wird aktualisiert…'},es:{title:'Completa tu pedido',add:'Añadir',remove:'Quitar',updating:'Actualizando el total…'},it:{title:'Completa il tuo ordine',add:'Aggiungi',remove:'Rimuovi',updating:'Aggiornamento del totale…'},pt:{title:'Complete a sua encomenda',add:'Adicionar',remove:'Remover',updating:'A atualizar o total…'}})[lang]||{title:'Complete your order',add:'Add',remove:'Remove',updating:'Updating your total…'};}
-function saveDraft(next){try{const values={};for(const id of ['cardholder','email','first','last','address','address2','city','state','zip','bcountry','baddress','bcity','bstate','bzip'])values[id]=$(id).value;sessionStorage.setItem('pmp:stripe-draft',JSON.stringify({at:Date.now(),values,same:$('same').checked,country:data.country}));}catch{}}
+function saveDraft(next){try{const values={};for(const id of ['email','first','last','address','address2','city','state','zip','bcountry','baddress','bcity','bstate','bzip'])values[id]=$(id).value;sessionStorage.setItem('pmp:stripe-draft',JSON.stringify({at:Date.now(),values,same:$('same').checked,country:data.country}));}catch{}}
 function restoreDraft(){try{const d=JSON.parse(sessionStorage.getItem('pmp:stripe-draft')||'null');if(!d||Date.now()-d.at>1800000)return;for(const [id,v]of Object.entries(d.values))if($(id))$(id).value=v;$('same').checked=d.same;$('same').dispatchEvent(new Event('change'));if(d.country!==data.country){$('state').value='';$('zip').value='';if(d.same)$('bcountry').value=data.country;}}catch{}}
 async function revise(change){if(busy)return;setBusy(true);$('pay').textContent=extra().updating;$('status').textContent=extra().updating;try{saveDraft();const next=await json('/api/stripe-checkout',{sessionId,email:$('email').value,...change});location.assign(next.checkoutUrl);}catch(e){$('country').value=data.country;$('status').className='error';$('status').textContent=e.message;setBusy(false);}}
 async function showSuggestions(){try{const result=await json('/api/stripe-checkout?view=options&session_id='+sessionId);if(!result.suggestions?.length)return;const h=document.createElement('h2');h.textContent=extra().title;$('suggestions').append(h);for(const it of result.suggestions){const row=document.createElement('div');row.className='line';if(it.image){const img=document.createElement('img');img.src=it.image;img.alt='';row.append(img);}const label=document.createElement('span');label.textContent=it.title+' — '+fmt(it.price);const b=document.createElement('button');b.type='button';b.className='action';b.dataset.cartEdit='1';b.textContent=extra().add;b.onclick=()=>revise({addVariant:it.variantId});row.append(label,b);$('suggestions').append(row);}}catch{}}
@@ -80,20 +104,20 @@ try{
  for(const c of data.countries||[{code:data.country}]){const o=document.createElement('option');o.value=c.code;o.textContent=new Intl.DisplayNames([data.locale||'en'],{type:'region'}).of(c.code);$('country').append(o);}$('country').value=data.country;$('bcountry').value=data.country;
  for(const it of data.items){const row=document.createElement('div');row.className='line';const label=document.createElement('span');label.textContent=it.title+' × '+it.quantity;const value=document.createElement('span');value.textContent=fmt(Number(it.price)*it.quantity);row.append(label,value);if(it.addon){const remove=document.createElement('button');remove.type='button';remove.className='remove-addon';remove.dataset.cartEdit='1';remove.textContent=extra().remove;remove.onclick=()=>revise({removeAddon:it.variantId});row.append(remove);}$('items').append(row);}
  $('mobile-total').textContent=fmt(data.quote.displayAmount);$('pay-total').textContent=fmt(data.quote.displayAmount);for(const row of $('items').children){const clone=row.cloneNode(true);clone.querySelectorAll('button').forEach(b=>b.remove());$('drawer-items').append(clone);}$('shipping').textContent=fmt(data.shipping);$('total').textContent=fmt(data.quote.displayAmount);$('promo').value=data.promotionCode||'';
- $('charge').textContent=t.charge.replace('{cad}',(data.quote.chargeMinor/100).toFixed(2));$('back').href=data.returnUrl.replace('/pages/thank-you','/cart');
+ renderChargeSummary();$('back').href=data.returnUrl.replace('/pages/thank-you','/cart');
  const script=document.createElement('script');script.src='https://js.stripe.com/v3/';await new Promise((resolve,reject)=>{script.onload=resolve;script.onerror=()=>reject(Error('Secure payment could not load. Please refresh.'));document.head.append(script);});
  stripeClient=Stripe(data.publishableKey,{locale:data.locale||'auto'});
  elements=stripeClient.elements({mode:'payment',currency:'cad',amount:data.quote.chargeMinor,appearance:{theme:'stripe',variables:{colorPrimary:'#4595c5',colorText:'#111111',colorBackground:'#ffffff',borderRadius:'8px',fontFamily:'Arial, sans-serif',fontSizeBase:'14px',spacingUnit:'4px'},rules:{'.Input':{borderColor:'#dedede'},'.Input:focus':{borderColor:'#4595c5',boxShadow:'0 0 0 1px #4595c5'}}}});
  const cardChoice=document.querySelector('#card-panel')?.parentElement?.querySelector('.method-choice');if(cardChoice)cardChoice.hidden=true;
  $('card').style.lineHeight='normal';
- card=elements.create('payment',{layout:{type:'accordion',defaultCollapsed:false,radios:true,spacedAccordionItems:false},fields:{billingDetails:{name:'never',email:'never',address:'never'}}});
+ card=elements.create('payment',{layout:{type:'accordion',defaultCollapsed:false,radios:true,spacedAccordionItems:false},fields:{billingDetails:{name:'auto',email:'never',address:'never'}}});
  card.mount('#card');card.on('change',e=>{if(!e.empty)trackStage('payment_started');});
- restoreDraft();$('cardholder').required=false;showSuggestions();
+ restoreDraft();showSuggestions();
  card.on('ready',()=>setBusy(false));
  card.on('loaderror',()=>{$('status').className='error';$('status').textContent='Secure payment could not load. Please refresh.';});
  $('checkout-form').addEventListener('submit',e=>{e.preventDefault();submit();});
  // Official Stripe wallet buttons, rendered only when actually supported.
- const grid=document.querySelector('.wallet-grid');grid.replaceChildren();
+ const grid=stripeWalletGrid;
  const express=elements.create('expressCheckout',{buttonHeight:48,buttonTheme:{applePay:'black',googlePay:'black'},layout:{maxColumns:2,maxRows:2},paymentMethods:{amazonPay:'never',paypal:'never'}});
  express.mount(grid);express.on('ready',e=>{$('wallets').hidden=!e.availablePaymentMethods||!Object.values(e.availablePaymentMethods).some(Boolean);});
  express.on('click',e=>{if(valid())e.resolve();});

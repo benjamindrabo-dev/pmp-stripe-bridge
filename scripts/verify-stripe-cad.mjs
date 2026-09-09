@@ -35,7 +35,7 @@ try{
    await page.goto(q.checkoutUrl,{waitUntil:'domcontentloaded'});
    await page.waitForFunction(()=>{const b=document.getElementById('pay');return b&&!b.disabled;},null,{timeout:45000});
    assert.ok((await page.locator('#total').innerText()).includes(expected),country+' displayed local total');
-   assert.ok((await page.locator('#charge').innerText()).includes('CAD'),country+' CAD disclosure');
+   if(expected==='CAD')assert.equal(await page.locator('#charge').isVisible(),false,'No redundant CAD notice');else assert.ok((await page.locator('#charge').innerText()).includes('CAD'),country+' actual CAD debit disclosure');
    assert.ok(await page.locator('#card iframe').count()>0,country+' secure Stripe frame mounted');
    assert.equal(errors.length,0,country+' browser errors: '+errors.join(' | '));
    const cardInput=page.frameLocator('#card iframe').first().locator('input[autocomplete="cc-number"]');
