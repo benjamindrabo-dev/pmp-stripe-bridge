@@ -1,0 +1,48 @@
+name: Verify visible Stripe checkout fields after UI correction
+on:
+  push:
+    paths:
+      - '.github/workflows/verify-stripe-visible-fields-20260909.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Prepare real secure-field visibility check
+        run: |
+          mkdir -p /tmp/pmp-ui
+          npm install --prefix /tmp/pmp-ui playwright --no-audit --no-fund
+          /tmp/pmp-ui/node_modules/.bin/playwright install --with-deps chromium > /tmp/pmp-visible-browser.log 2>&1 || { tail -n 40 /tmp/pmp-visible-browser.log; exit 1; }
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('scripts/verify-stripe-checkout-ui.mjs');s=p.read_text()
+          old="await page.screenshot({path:out+'/checkout-'+currency+'.png',fullPage:true});"
+          assert s.count(old)==1
+          s=s.replace(old,"""// Scroll the cross-origin frame into view before capturing it. A full-page
+          // screenshot alone does not guarantee off-screen iframes are painted.
+          const cardInput=page.frameLocator('#card iframe').first().locator('input[autocomplete=\"cc-number\"]');
+          await cardInput.click({trial:true,timeout:30000});
+          assert.equal(await cardInput.isVisible(),true,'Real Stripe card-number field is visible and actionable');
+          await page.locator('#card').scrollIntoViewIfNeeded();
+          await page.waitForTimeout(700);
+          await page.screenshot({path:out+'/checkout-'+currency+'.png',fullPage:true});
+          await page.screenshot({path:out+'/checkout-'+currency+'-payment.png',fullPage:false});""")
+          s=s.replace("if(country==='CA')await page.screenshot({path:out+'/checkout-CAD-top.png',fullPage:false});", "if(country==='CA'){await page.evaluate(()=>scrollTo(0,0));await page.waitForTimeout(400);await page.screenshot({path:out+'/checkout-CAD-top.png',fullPage:false});}")
+          s=s.replace('duplicateNameRemoved:true,','duplicateNameRemoved:true,secureCardFieldVisible:true,')
+          p.write_text(s)
+          PY
+      - name: Check production in five currencies without entering a card
+        run: node scripts/verify-stripe-checkout-ui.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stripe-checkout-ui-final-visible-verification
+          path: /tmp/pmp-ui-results/production
+          if-no-files-found: ignore
