@@ -56,7 +56,7 @@ export default async function handler(req, res) {
   const publicKey = process.env.STRIPE_PUBLISHABLE_KEY || (await import('../lib/stripe-cad-bridge.js')).PUBLIC_KEY;
   const report = {
     revision: 'pmp-stripe-cad-live-2026-09-09',
-    checkoutProvider: process.env.PMP_LEGACY_CHECKOUT === '1' ? 'legacy' : 'stripe',
+    checkoutProvider: 'square',
     chargeCurrency: 'CAD',
     displayCurrency: 'shopify_market',
     serverKeyConfigured: /^(sk|rk)_live_/.test(secret),

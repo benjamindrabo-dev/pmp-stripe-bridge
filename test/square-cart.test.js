@@ -1,13 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {reviseCart,suggestions} from '../lib/square-cart.js';
-import {paySquare} from '../lib/square-bridge.js';
+import {paySquare,squareWebhookKey,squareApplePayKey,squareVerificationKey} from '../lib/square-bridge.js';
 const id='sq_'+'c'.repeat(32);
 function harness(){
  const original=global.fetch;const db=new Map();
  const cart={id,country:'US',displayCurrency:'USD',scale:100,locale:'en',attribution:{},catalogPrices:{'gid://shopify/ProductVariant/1':10},items:[{variant_id:1,title:'Main',quantity:3,price_cents:1000,original_price_cents:1000},{variant_id:1,title:'Gift',quantity:2,price_cents:0,original_price_cents:0}],suggestions:[{variant_id:2,title:'Add-on'}]};
- db.set('sess:'+id,JSON.stringify(cart));db.set('square:webhook:production',JSON.stringify({signature_key:'test'}));db.set('square:apple-pay:production',JSON.stringify({status:'VERIFIED'}));
- Object.assign(process.env,{SQUARE_ENV:'production',SQUARE_ACCESS_TOKEN:'fake',SQUARE_LOCATION_ID:'LOC',UPSTASH_REDIS_REST_URL:'https://redis.invalid',SHOPIFY_STORE_DOMAIN:'test.invalid'});
+ db.set('sess:'+id,JSON.stringify(cart));
+ Object.assign(process.env,{SQUARE_ENV:'production',SQUARE_ACCESS_TOKEN:'fake',SQUARE_APPLICATION_ID:'test-app',SQUARE_LOCATION_ID:'LOC',UPSTASH_REDIS_REST_URL:'https://redis.invalid',SHOPIFY_STORE_DOMAIN:'test.invalid'});
+ db.set(squareWebhookKey(),JSON.stringify({id:'test-hook',signature_key:'test',enabled:true}));
+ db.set(squareApplePayKey(),JSON.stringify({status:'VERIFIED'}));
+ db.set(squareVerificationKey(),JSON.stringify({squareDeliveryStatus:200,invalidSignatureRejected:true}));
  const response=x=>new Response(JSON.stringify(x));
  global.fetch=async(url,opts={})=>{
   const b=opts.body?JSON.parse(opts.body):null;

@@ -53,7 +53,8 @@ globalThis.fetch = async function pmpCampaignAwareFetch(input, init) {
 };
 
 export default async function handler(req, res) {
-  if (process.env.PMP_LEGACY_CHECKOUT !== "1" || req.body?.payment_provider === "stripe_cad_preview") { req.squareMode = true; req.stripeCadMode = true; return baseHandler(req,res); }
+  // Square restored for the storefront; legacy Stripe settlement endpoints remain available.
+  if (req.body?.payment_provider === "square" || process.env.PMP_LEGACY_CHECKOUT !== "1") { req.squareMode = true; req.stripeCadMode = false; return baseHandler(req,res); }
   if (req.body?.payment_provider === 'square') {
     req.squareMode = true;
     return baseHandler(req,res);
