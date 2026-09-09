@@ -1,0 +1,91 @@
+name: Complete Square restoration
+on:
+  push:
+    paths:
+      - '.github/workflows/finish-square-restoration.yml'
+permissions:
+  contents: write
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply reviewed restoration and update cache fixtures
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import textwrap
+          if 'req.stripeCadMode = false' not in Path('api/create-checkout.js').read_text():
+              workflow=Path('.github/workflows/restore-square-account.yml').read_text()
+              code=workflow.split("          python3 - <<'PY'\n",1)[1].split('\n          PY\n',1)[0]
+              exec(compile(textwrap.dedent(code),'reviewed-square-restoration','exec'))
+              p=Path('test/square-cart.test.js')
+              s=p.read_text().replace("import {paySquare}","import {paySquare,squareWebhookKey,squareApplePayKey,squareVerificationKey}")
+              old="db.set('sess:'+id,JSON.stringify(cart));db.set('square:webhook:production',JSON.stringify({signature_key:'test'}));db.set('square:apple-pay:production',JSON.stringify({status:'VERIFIED'}));"
+              assert s.count(old)==1
+              s=s.replace(old,"db.set('sess:'+id,JSON.stringify(cart));")
+              s=s.replace("SQUARE_ACCESS_TOKEN:'fake',","SQUARE_ACCESS_TOKEN:'fake',SQUARE_APPLICATION_ID:'test-app',")
+              anchor=" const response=x=>new Response(JSON.stringify(x));"
+              assert s.count(anchor)==1
+              s=s.replace(anchor," db.set(squareWebhookKey(),JSON.stringify({id:'test-hook',signature_key:'test',enabled:true}));\n db.set(squareApplePayKey(),JSON.stringify({status:'VERIFIED'}));\n db.set(squareVerificationKey(),JSON.stringify({squareDeliveryStatus:200,invalidSignatureRejected:true}));\n"+anchor)
+              p.write_text(s)
+          print('Restoration and account-scoped fixtures prepared.')
+          PY
+      - name: Run all regression tests
+        run: |
+          npm install --ignore-scripts --no-audit --no-fund
+          npm test > /tmp/square-regression.log 2>&1 || { tail -n 100 /tmp/square-regression.log; exit 1; }
+          tail -n 12 /tmp/square-regression.log
+      - name: Publish tested restoration
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add api/create-checkout.js api/square-webhook.js api/square-health.js api/stripe-health.js lib/square-bridge.js test/stripe-cad.test.js test/square-account-migration.test.js test/square-cart.test.js scripts/verify-square-restored.mjs
+          if ! git diff --cached --quiet; then
+            git commit -m 'Restore Square CAD checkout with account-isolated webhook and Apple Pay configuration'
+            git push origin HEAD:main
+          fi
+      - name: Check deployed account and location
+        run: |
+          node --input-type=module <<'JS'
+          let ok=false;
+          for(let i=0;i<36;i++){
+            try{
+              const r=await fetch('https://checkout.puremajestypet.com/api/square-health',{signal:AbortSignal.timeout(10000)});
+              const s=await r.json();
+              if(s.revision==='square-account-restore-2026-09-09'){
+                console.log('Production credentials check:',JSON.stringify(s));
+                if(!s.cardProcessing||s.currency!=='CAD')throw Error('New Square location cannot process CAD card payments');
+                ok=true;break;
+              }
+            }catch(e){if(String(e.message).includes('cannot process'))throw e;}
+            await new Promise(r=>setTimeout(r,5000));
+          }
+          if(!ok)throw Error('Restoration deployment not observed');
+          JS
+      - name: Prepare browser verification
+        run: |
+          mkdir -p /tmp/pmp-qa
+          npm install --prefix /tmp/pmp-qa playwright --no-audit --no-fund
+          /tmp/pmp-qa/node_modules/.bin/playwright install --with-deps chromium > /tmp/browser-install.log 2>&1 || { tail -n 40 /tmp/browser-install.log; exit 1; }
+      - name: Verify currencies, secure form, discount and webhook
+        run: |
+          node scripts/verify-square-restored.mjs
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          const r=await fetch('https://checkout.puremajestypet.com/api/square-health');
+          const s=await r.json();console.log('Final Square configuration:',JSON.stringify(s));
+          assert.equal(s.ready,true);assert.equal(s.webhookTestStatus,200);assert.equal(s.invalidSignatureRejected,true);assert.equal(s.applePay,'VERIFIED');
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: square-checkout-restoration-verification
+          path: /tmp/pmp-qa/results
+          if-no-files-found: ignore
