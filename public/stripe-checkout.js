@@ -96,7 +96,7 @@ try{
  const grid=document.querySelector('.wallet-grid');grid.replaceChildren();
  const express=elements.create('expressCheckout',{buttonHeight:48,buttonTheme:{applePay:'black',googlePay:'black'},layout:{maxColumns:2,maxRows:2},paymentMethods:{amazonPay:'never',paypal:'never'}});
  express.mount(grid);express.on('ready',e=>{$('wallets').hidden=!e.availablePaymentMethods||!Object.values(e.availablePaymentMethods).some(Boolean);});
- express.on('click',e=>{if(valid())e.resolve();else e.reject();});
+ express.on('click',e=>{if(valid())e.resolve();});
  express.on('confirm',e=>submit(e));
 
 }catch(e){$('status').className='error';$('status').textContent=e.message;}

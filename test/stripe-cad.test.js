@@ -15,3 +15,5 @@ for(const [currency,scale,total,charge] of [['USD',100,2899,4000],['EUR',100,269
 }
 test('Stripe surface preserves local formatter and uses CAD payment amount',()=>{const s=source('public/stripe-checkout.js');assert.ok(s.includes('currency:data.quote.displayCurrency'));assert.ok(s.includes("currency:'cad',amount:data.quote.chargeMinor"));assert.ok(s.includes('stripeClient.confirmPayment'));assert.ok(!s.includes('Square.payments'));assert.ok(s.includes('elements.submit()'));});
 test('historical Square payments and both webhook families remain present',()=>{assert.ok(source('public/square-checkout.js').includes('Square.payments'));const w=source('api/stripe-webhook.js');assert.ok(w.includes('payment_intent.succeeded'));assert.ok(w.includes('checkout.session.completed'));});
+
+test('new customer checkouts default to Stripe CAD and preserve explicit rollback',()=>{const s=source('api/create-checkout.js');assert.ok(s.includes('process.env.PMP_LEGACY_CHECKOUT !== "1"'));assert.ok(s.includes('req.stripeCadMode = true'));});

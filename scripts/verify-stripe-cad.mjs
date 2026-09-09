@@ -24,7 +24,7 @@ try{
    const p=await pr.json(),cart=await cr.json();
    const variant=p.variants.find(v=>v.available)||p.variants[0];
    assert.equal(cart.currency,expected,country+' market currency');
-   const body={payment_provider:'stripe_cad_preview',items:[{variant_id:variant.id,product_id:p.id,title:p.title,quantity:1,price_cents:variant.price,image:p.featured_image}],currency:cart.currency,checkout_country:country,locale,shopify_cart_url:store+root+'/cart',note:'Automated checkout configuration verification; no payment',marketing_allowed:false};
+   const body={payment_provider:'square',items:[{variant_id:variant.id,product_id:p.id,title:p.title,quantity:1,price_cents:variant.price,image:p.featured_image}],currency:cart.currency,checkout_country:country,locale,shopify_cart_url:store+root+'/cart',note:'Automated checkout configuration verification; no payment',marketing_allowed:false};
    const r=await api.post(bridge+'/api/create-checkout',{data:body});
    const q=await r.json();assert.ok(r.ok(),country+' quote: '+JSON.stringify(q));
    assert.equal(q.paymentProvider,'stripe');
@@ -38,6 +38,10 @@ try{
    assert.ok((await page.locator('#charge').innerText()).includes('CAD'),country+' CAD disclosure');
    assert.ok(await page.locator('#card iframe').count()>0,country+' secure Stripe frame mounted');
    assert.equal(errors.length,0,country+' browser errors: '+errors.join(' | '));
+   const cardInput=page.frameLocator('#card iframe').first().locator('input[autocomplete="cc-number"]');
+   await cardInput.click({trial:true,timeout:30000});
+   await page.locator('#card').scrollIntoViewIfNeeded();
+   await page.waitForTimeout(500);
    await page.screenshot({path:'/tmp/pmp-qa/results/stripe-'+expected+'.png',fullPage:true});
    await page.close();
    const invalid=await api.post(bridge+'/api/stripe-checkout',{data:{action:'prepare',sessionId:q.sessionId,confirmedChargeMinor:0}});

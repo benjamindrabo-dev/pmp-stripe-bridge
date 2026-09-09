@@ -15,15 +15,16 @@ function responseHarness() {
   };
 }
 
-test("production campaign wrapper stays at Stripe's 50-key metadata limit", async (t) => {
+test("legacy campaign wrapper stays at Stripe's 50-key metadata limit", async (t) => {
   const originalFetch = globalThis.fetch;
   const envNames = [
     "SHOPIFY_STORE_DOMAIN", "SHOPIFY_ADMIN_TOKEN", "STRIPE_SECRET_KEY",
     "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN", "SUCCESS_URL",
-    "OMNISEND_API_KEY", "BRIDGE_PUBLIC_URL",
+    "OMNISEND_API_KEY", "BRIDGE_PUBLIC_URL", "PMP_LEGACY_CHECKOUT",
   ];
   const originalEnv = Object.fromEntries(envNames.map((name) => [name, process.env[name]]));
   Object.assign(process.env, {
+    PMP_LEGACY_CHECKOUT: "1", // Explicitly test the retained rollback implementation.
     SHOPIFY_STORE_DOMAIN: "shop.example",
     SHOPIFY_ADMIN_TOKEN: "shop-token",
     STRIPE_SECRET_KEY: "stripe-token",

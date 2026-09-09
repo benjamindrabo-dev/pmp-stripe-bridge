@@ -53,9 +53,12 @@ export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
   const secret = process.env.STRIPE_SECRET_KEY || '';
   const signingSecret = process.env.STRIPE_WEBHOOK_SECRET || '';
-  const publicKey = process.env.STRIPE_PUBLISHABLE_KEY || '';
+  const publicKey = process.env.STRIPE_PUBLISHABLE_KEY || (await import('../lib/stripe-cad-bridge.js')).PUBLIC_KEY;
   const report = {
-    revision: 'pmp-stripe-account-migration-2026-09-09-r2',
+    revision: 'pmp-stripe-cad-live-2026-09-09',
+    checkoutProvider: process.env.PMP_LEGACY_CHECKOUT === '1' ? 'legacy' : 'stripe',
+    chargeCurrency: 'CAD',
+    displayCurrency: 'shopify_market',
     serverKeyConfigured: /^(sk|rk)_live_/.test(secret),
     webhookSecretMatches: createHash('sha256').update(signingSecret).digest('hex') === WEBHOOK_FINGERPRINT,
     publishableKeyConfigured: /^pk_live_[A-Za-z0-9]+$/.test(publicKey),
