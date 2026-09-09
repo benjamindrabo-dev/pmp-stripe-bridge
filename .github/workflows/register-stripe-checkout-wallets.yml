@@ -1,0 +1,136 @@
+name: Verify Stripe checkout wallets
+on:
+  push:
+    paths:
+      - '.github/workflows/register-stripe-checkout-wallets.yml'
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: pmp-checkout-provider-deployment
+  cancel-in-progress: false
+jobs:
+  wallets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Add fixed-domain Stripe wallet registration
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          def replace(path, old, new):
+              p=Path(path); s=p.read_text()
+              if new in s and old not in s: return
+              if s.count(old)!=1: raise RuntimeError('Unexpected source revision: '+path)
+              p.write_text(s.replace(old,new,1))
+          Path('lib/stripe-wallet-domain.js').write_text('''// Only the merchant's existing checkout host can be registered here.
+          // The caller verifies the Stripe account before calling this helper.
+          export const STRIPE_WALLET_DOMAIN='checkout.puremajestypet.com';
+          export async function ensureStripeWalletDomain(stripeApi) {
+            const list=await stripeApi('/payment_method_domains?domain_name='+STRIPE_WALLET_DOMAIN+'&limit=100');
+            if(!Array.isArray(list.data))throw new Error('Stripe wallet domain lookup unavailable');
+            let domain=list.data.find(d=>d.domain_name===STRIPE_WALLET_DOMAIN&&d.livemode===true);
+            if(!domain)domain=await stripeApi('/payment_method_domains',
+              {domain_name:STRIPE_WALLET_DOMAIN,enabled:'true'},'pmp-checkout-wallet-domain-v1');
+            if(domain?.domain_name!==STRIPE_WALLET_DOMAIN||domain.livemode!==true)throw new Error('Stripe wallet domain mismatch');
+            return {registered:true,enabled:domain.enabled===true,
+              applePay:domain.apple_pay?.status||'not_verified',googlePay:domain.google_pay?.status||'not_verified'};
+          }
+          ''')
+          replace('lib/stripe-cad-bridge.js',
+              "import crypto from 'node:crypto';",
+              "import crypto from 'node:crypto';\nimport {ensureStripeWalletDomain} from './stripe-wallet-domain.js';")
+          replace('lib/stripe-cad-bridge.js',
+              "if(!process.env.STRIPE_WEBHOOK_SECRET)throw error('Stripe webhook not configured');\n accountCheckedAt=Date.now();",
+              "if(!process.env.STRIPE_WEBHOOK_SECRET)throw error('Stripe webhook not configured');\n // Missing wallet setup must never disable otherwise healthy card payments.\n try{await ensureStripeWalletDomain(stripe);}catch{console.warn('Stripe wallet domain setup unavailable');}\n accountCheckedAt=Date.now();")
+          replace('api/stripe-health.js',
+              "revision: 'pmp-stripe-reactivated-square-layout-2026-09-09',",
+              "revision: 'pmp-stripe-reactivated-square-layout-2026-09-09',\n    walletDomainIntegration: 'fixed-checkout-domain-v1',")
+          replace('api/stripe-health.js',
+              'if (!cached || Date.now() - cached.at > 60000) {',
+              'if (!cached || Date.now() - cached.at > 60000 || !cached.walletDomain) {')
+          Path('test/stripe-wallet-domain.test.js').write_text('''import test from 'node:test';
+          import assert from 'node:assert/strict';
+          import {ensureStripeWalletDomain,STRIPE_WALLET_DOMAIN} from '../lib/stripe-wallet-domain.js';
+          const domain={domain_name:STRIPE_WALLET_DOMAIN,livemode:true,enabled:true,apple_pay:{status:'active'},google_pay:{status:'active'}};
+          test('existing live checkout domain is reused without writing',async()=>{
+            const calls=[];const r=await ensureStripeWalletDomain(async(path,body)=>{calls.push({path,body});return {data:[domain]};});
+            assert.equal(calls.length,1);assert.equal(calls[0].body,undefined);assert.equal(r.applePay,'active');
+          });
+          test('missing domain is registered with a fixed name and stable idempotency key',async()=>{
+            const calls=[];const r=await ensureStripeWalletDomain(async(path,body,key)=>{calls.push({path,body,key});return body?domain:{data:[]};});
+            assert.equal(calls.length,2);assert.equal(calls[1].path,'/payment_method_domains');
+            assert.deepEqual(calls[1].body,{domain_name:STRIPE_WALLET_DOMAIN,enabled:'true'});
+            assert.equal(calls[1].key,'pmp-checkout-wallet-domain-v1');assert.equal(r.enabled,true);
+          });
+          test('other domains and test-mode objects cannot stand in for the live checkout domain',async()=>{
+            let writes=0;await ensureStripeWalletDomain(async(path,body)=>{if(body){writes++;return domain;}return {data:[{...domain,domain_name:'other.invalid'},{...domain,livemode:false}]};});assert.equal(writes,1);
+          });
+          test('an unexpected registration result is rejected',async()=>{
+            await assert.rejects(()=>ensureStripeWalletDomain(async(path,body)=>body?{...domain,domain_name:'other.invalid'}:{data:[]}),/mismatch/);
+          });
+          test('disabled existing domains are reported without silently overriding their status',async()=>{
+            const r=await ensureStripeWalletDomain(async()=>({data:[{...domain,enabled:false}]}));assert.equal(r.enabled,false);
+          });
+          ''')
+          PY
+      - name: Run full regression suite
+        shell: bash
+        run: |
+          mkdir -p /tmp/pmp-qa/results
+          npm install --ignore-scripts --no-audit --no-fund
+          npm test > /tmp/pmp-qa/results/regression.log 2>&1 || { tail -n 100 /tmp/pmp-qa/results/regression.log; exit 1; }
+          tail -n 12 /tmp/pmp-qa/results/regression.log
+      - name: Publish tested wallet integration
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/stripe-wallet-domain.js lib/stripe-cad-bridge.js api/stripe-health.js test/stripe-wallet-domain.test.js
+          if ! git diff --cached --quiet; then
+            git commit -m 'Register Stripe checkout wallet domain without altering page layout or card payment flow'
+            git push origin HEAD:main
+          fi
+      - name: Observe deployed wallet integration
+        shell: bash
+        run: |
+          node --input-type=module <<'JS'
+          let ready=false;
+          for(let i=0;i<48;i++){
+            try{const s=await (await fetch('https://checkout.puremajestypet.com/api/stripe-health',{signal:AbortSignal.timeout(12000)})).json();if(s.walletDomainIntegration==='fixed-checkout-domain-v1'&&s.serverReady){ready=true;break;}}catch{}
+            await new Promise(r=>setTimeout(r,5000));
+          }
+          if(!ready)throw Error('Updated Stripe deployment not observed');
+          JS
+      - name: Prepare browser verification
+        shell: bash
+        run: |
+          npm install --prefix /tmp/pmp-qa playwright --no-audit --no-fund
+          /tmp/pmp-qa/node_modules/.bin/playwright install --with-deps chromium > /tmp/stripe-wallet-browser.log 2>&1 || { tail -n 40 /tmp/stripe-wallet-browser.log; exit 1; }
+      - name: Verify market checkout and registered wallet domain without payment
+        shell: bash
+        run: |
+          node scripts/verify-stripe-cad.mjs
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {writeFileSync} from 'node:fs';
+          const health=await (await fetch('https://checkout.puremajestypet.com/api/stripe-health?probe=1',{signal:AbortSignal.timeout(20000)})).json();
+          console.log('Final Stripe readiness:',JSON.stringify(health));
+          writeFileSync('/tmp/pmp-qa/results/stripe-health.json',JSON.stringify(health,null,2));
+          assert.equal(health.serverReady,true);assert.equal(health.checkoutProvider,'stripe');
+          assert.equal(health.wallets.registered,true);assert.equal(health.wallets.enabled,true);
+          assert.equal(health.wallets.applePay,'active');assert.equal(health.wallets.googlePay,'active');
+          JS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stripe-reactivation-final-verification
+          path: /tmp/pmp-qa/results
+          if-no-files-found: ignore
