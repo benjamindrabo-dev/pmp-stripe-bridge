@@ -17,15 +17,16 @@ export default async function handler(req,res) {
     if(!response.ok||!data.location)return res.status(503).json({ready:false,environment,error:'Square credential or location verification failed',squareStatus:response.status});
     const location=data.location;
     const cardProcessing=location.status==='ACTIVE'&&location.capabilities?.includes('CREDIT_CARD_PROCESSING')===true;
-    const [hook,apple,verification]=await Promise.all([get(squareWebhookKey()),get(squareApplePayKey()),get(squareVerificationKey())]);
+    const [hook,apple,verification,receipt]=await Promise.all([get(squareWebhookKey()),get(squareApplePayKey()),get(squareVerificationKey()),get(squareWebhookKey()+':receipt')]);
     const webhookConfigured=Boolean(hook?.signature_key&&hook.enabled);
     const ready=cardProcessing&&location.currency==='CAD'&&webhookConfigured;
     return res.status(ready?200:503).json({
-      revision:'square-account-restore-2026-09-09',ready,environment,provider:'square',
+      revision:'square-account-restore-2026-09-09-r2',ready,environment,provider:'square',
       currency:location.currency,cardProcessing,accountScope:squareAccountScope(),
       applicationIdSuffix:process.env.SQUARE_APPLICATION_ID.slice(-6),locationIdSuffix:process.env.SQUARE_LOCATION_ID.slice(-6),
       webhookConfigured,webhookId:hook?.id||null,
       webhookTestStatus:verification?.squareDeliveryStatus??null,
+      signedWebhookDeliveryStatus:receipt?.signatureVerified===true?receipt.httpStatus:null,
       invalidSignatureRejected:verification?.invalidSignatureRejected===true,
       applePay:apple?.status||'NOT_REGISTERED'
     });
