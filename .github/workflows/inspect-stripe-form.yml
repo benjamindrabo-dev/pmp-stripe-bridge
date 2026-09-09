@@ -13,6 +13,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - name: Regression tests
+        run: node --test
       - name: Install browser
         run: |
           mkdir -p /tmp/render
@@ -32,13 +34,16 @@ jobs:
             const p=await (await api.get(site+'/en-ca/products/'+product.handle+'.js')).json();const v=p.variants.find(v=>v.available)||p.variants[0];
             const q=await (await api.post(origin+'/api/create-checkout',{data:{payment_provider:'stripe_cad_preview',items:[{variant_id:v.id,product_id:p.id,title:p.title,quantity:1,price_cents:v.price}],currency:'CAD',checkout_country:'CA',locale:'en',marketing_allowed:false}})).json();
             if(!q.checkoutUrl)throw Error('No quote');
-            const browser=await chromium.launch();const page=await browser.newPage({viewport:{width:1280,height:900}});const consoleMessages=[];
+            const browser=await chromium.launch();const page=await browser.newPage({viewport:{width:1280,height:1000}});const consoleMessages=[];
             page.on('console',m=>{if(['error','warning'].includes(m.type()))consoleMessages.push(m.text().replace(/(?:pi|cs)_[A-Za-z0-9]+_secret_[A-Za-z0-9]+/g,'[redacted]'));});
             page.on('pageerror',e=>consoleMessages.push(e.message));
-            await page.goto(q.checkoutUrl,{waitUntil:'domcontentloaded'});await page.waitForTimeout(12000);
-            const frames=[];for(const f of page.frames()){const url=new URL(f.url()||'about:blank');const info=await f.evaluate(()=>({title:document.title,inputs:[...document.querySelectorAll('input')].map(e=>({name:e.name,autocomplete:e.autocomplete,placeholder:e.placeholder,visible:!!(e.offsetWidth||e.offsetHeight)})),bodyText:document.body?.innerText?.slice(0,1800)})).catch(e=>({error:e.message}));frames.push({origin:url.origin,path:url.pathname,...info});}
-            fs.mkdirSync('/tmp/render/results',{recursive:true});fs.writeFileSync('/tmp/render/results/diagnostic.json',JSON.stringify({frames,consoleMessages},null,2));
-            await page.screenshot({path:'/tmp/render/results/render.png',fullPage:true});console.log(JSON.stringify({frames,consoleMessages}));
+            await page.goto(q.checkoutUrl,{waitUntil:'domcontentloaded'});await page.waitForTimeout(9000);
+            const geometry=await page.evaluate(()=>[...document.querySelectorAll('#card,#card-panel,#card iframe,#card div,.wallet-grid,.wallet-grid iframe')].map(e=>{const s=getComputedStyle(e),r=e.getBoundingClientRect();return {tag:e.tagName,id:e.id,className:e.className,rect:{x:r.x,y:r.y,width:r.width,height:r.height},display:s.display,visibility:s.visibility,opacity:s.opacity,position:s.position,transform:s.transform,overflow:s.overflow,clipPath:s.clipPath,style:e.getAttribute('style')};}));
+            const frames=[];for(const f of page.frames()){if(!f.url().startsWith('https://js.stripe.com/'))continue;const url=new URL(f.url());const info=await f.evaluate(()=>{const target=document.querySelector('input[autocomplete="cc-number"]');const ancestors=[];for(let e=target;e;e=e.parentElement){const s=getComputedStyle(e),r=e.getBoundingClientRect();ancestors.push({tag:e.tagName,id:e.id,className:e.className,rect:{x:r.x,y:r.y,width:r.width,height:r.height},display:s.display,visibility:s.visibility,opacity:s.opacity,transform:s.transform,overflow:s.overflow,clipPath:s.clipPath});}return {title:document.title,inputFound:!!target,ancestors};}).catch(e=>({error:e.message}));frames.push({origin:url.origin,path:url.pathname,...info});}
+            let actionable=false;for(const f of page.frames()){const target=f.locator('input[autocomplete="cc-number"]');if(await target.count()){await target.click({trial:true,timeout:15000});actionable=true;break;}}
+            fs.mkdirSync('/tmp/render/results',{recursive:true});fs.writeFileSync('/tmp/render/results/diagnostic.json',JSON.stringify({geometry,frames,consoleMessages,actionable},null,2));
+            await page.locator('#card').scrollIntoViewIfNeeded();await page.screenshot({path:'/tmp/render/results/render.png',fullPage:true});await page.locator('#card').screenshot({path:'/tmp/render/results/card.png'});console.log(JSON.stringify({geometry,frames,consoleMessages,actionable}));
+            if(!actionable)throw Error('Card number input is not actionable');
             await browser.close();await api.dispose();
           })().catch(e=>{console.error(e);process.exit(1);});
           JS
