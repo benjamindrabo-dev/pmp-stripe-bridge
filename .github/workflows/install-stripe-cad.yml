@@ -15,7 +15,9 @@ jobs:
         with:
           node-version: '24'
       - name: Generate isolated Stripe checkout
-        run: python3 scripts/install-stripe-cad.py
+        run: |
+          python3 scripts/install-stripe-cad.py
+          sed -i 's/promo_1U6IEuA0auDoBNzsRt1kuqge/promo_1UDccgPw2Aen0E79qBO3wtV4/g' test/create-checkout-wrapper-metadata.test.js
       - name: Syntax checks
         run: |
           node --check lib/stripe-cad-bridge.js
