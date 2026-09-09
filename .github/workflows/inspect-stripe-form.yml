@@ -1,0 +1,51 @@
+name: Inspect Stripe form rendering
+on:
+  push:
+    paths: [.github/workflows/inspect-stripe-form.yml]
+permissions:
+  contents: read
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install browser
+        run: |
+          mkdir -p /tmp/render
+          cd /tmp/render
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+      - name: Read-only browser diagnostics
+        run: |
+          cat > /tmp/render/check.cjs <<'JS'
+          const {chromium,request}=require('playwright');
+          const fs=require('node:fs');
+          (async()=>{
+            const api=await request.newContext();const site='https://www.puremajestypet.com';const origin='https://checkout.puremajestypet.com';
+            const products=(await (await api.get(site+'/en-ca/products.json?limit=100')).json()).products;
+            const product=products.find(p=>/collagen/i.test(p.title));
+            const p=await (await api.get(site+'/en-ca/products/'+product.handle+'.js')).json();const v=p.variants.find(v=>v.available)||p.variants[0];
+            const q=await (await api.post(origin+'/api/create-checkout',{data:{payment_provider:'stripe_cad_preview',items:[{variant_id:v.id,product_id:p.id,title:p.title,quantity:1,price_cents:v.price}],currency:'CAD',checkout_country:'CA',locale:'en',marketing_allowed:false}})).json();
+            if(!q.checkoutUrl)throw Error('No quote');
+            const browser=await chromium.launch();const page=await browser.newPage({viewport:{width:1280,height:900}});const consoleMessages=[];
+            page.on('console',m=>{if(['error','warning'].includes(m.type()))consoleMessages.push(m.text().replace(/(?:pi|cs)_[A-Za-z0-9]+_secret_[A-Za-z0-9]+/g,'[redacted]'));});
+            page.on('pageerror',e=>consoleMessages.push(e.message));
+            await page.goto(q.checkoutUrl,{waitUntil:'domcontentloaded'});await page.waitForTimeout(12000);
+            const frames=[];for(const f of page.frames()){const url=new URL(f.url()||'about:blank');const info=await f.evaluate(()=>({title:document.title,inputs:[...document.querySelectorAll('input')].map(e=>({name:e.name,autocomplete:e.autocomplete,placeholder:e.placeholder,visible:!!(e.offsetWidth||e.offsetHeight)})),bodyText:document.body?.innerText?.slice(0,1800)})).catch(e=>({error:e.message}));frames.push({origin:url.origin,path:url.pathname,...info});}
+            fs.mkdirSync('/tmp/render/results',{recursive:true});fs.writeFileSync('/tmp/render/results/diagnostic.json',JSON.stringify({frames,consoleMessages},null,2));
+            await page.screenshot({path:'/tmp/render/results/render.png',fullPage:true});console.log(JSON.stringify({frames,consoleMessages}));
+            await browser.close();await api.dispose();
+          })().catch(e=>{console.error(e);process.exit(1);});
+          JS
+          node /tmp/render/check.cjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: stripe-render-diagnostic
+          path: /tmp/render/results
+          retention-days: 3
