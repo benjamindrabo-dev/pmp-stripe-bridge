@@ -40,6 +40,11 @@ export default async function handler(req,res){
    const cart=await loadCart(q.sessionId);const url=new URL(result.checkoutUrl);url.searchParams.set('session_id',q.sessionId);
    result={...result,sessionId:q.sessionId,checkoutUrl:url.href,amountTotal:q.total,analytics:{beginCheckout:{eventId:deterministicEventId('begin checkout',q.sessionId),currency:cart.displayCurrency,value:cart.subtotal/100,items:cart.items.map(i=>({item_id:String(i.variant_id),item_name:i.title,quantity:i.quantity,price:i.price_cents/100}))}}};
   }
+  if(!body.pmp_cart){
+   // Existing tabs only permit this path. The gd_ query-specific Vercel rewrite
+   // serves the GoDaddy page; genuine Square session URLs are not changed.
+   const compatible=new URL(result.checkoutUrl);compatible.pathname='/square-checkout.html';result={...result,checkoutUrl:compatible.href};
+  }
   // "square" is the original storefront redirect discriminator, not the
   // processor. paymentProvider unambiguously identifies the actual processor.
   return res.status(200).json({...result,provider:'square',paymentProvider:'godaddy'});
