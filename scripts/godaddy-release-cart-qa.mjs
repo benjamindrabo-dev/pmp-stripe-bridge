@@ -1,10 +1,11 @@
-// Explicit release-Preview QA: real anonymous carts and quote storage only.
+// Explicit Preview QA: real anonymous carts and quote storage only. No secret is moved between environments.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import {compactCart} from '../public/godaddy-cart-snapshot.js';
 async function run(){
  const report={type:'release-entry-real-Shopify-carts',startedAt:new Date().toISOString(),cases:[],paymentsSubmitted:0,ordersCreated:0};
- if(process.env.VERCEL_ENV!=='preview'||process.env.VERCEL_GIT_COMMIT_REF!=='release/godaddy-live-20260910')throw Error('PREVIEW_BRANCH_REQUIRED');
+ const branches=['release/godaddy-live-20260910','prep/godaddy-payments-20260909'];
+ if(process.env.VERCEL_ENV!=='preview'||!branches.includes(process.env.VERCEL_GIT_COMMIT_REF))throw Error('PREVIEW_BRANCH_REQUIRED');
  const values=JSON.parse(fs.readFileSync(new URL('../vercel.json',import.meta.url),'utf8')).env||{};
  for(const [k,v]of Object.entries(values))if(process.env[k]==null)process.env[k]=v;
  if(process.env.PMP_GODADDY_ENABLED!=='0')throw Error('DISABLED_PAYMENTS_REQUIRED');
