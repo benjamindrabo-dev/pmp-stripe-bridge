@@ -1,0 +1,53 @@
+{
+  "recordedAt": "2026-09-10",
+  "scope": "Register the production GoDaddy webhook and verify receiver signatures; no payment migration",
+  "evidence": {
+    "deploymentId": "dpl_HsBi5EufbGh9PJQgJ7H6hfjrAUnV",
+    "commit": "fa75bd274a3b98f8824bad732122bc919bc7b3c6",
+    "logMarker": "GODADDY_HOOK_SETUP",
+    "testedAtUtc": "2026-09-10T15:26:18.386Z",
+    "source": "Actual production Vercel build logs retrieved through the connected Vercel tool"
+  },
+  "hookRegisteredAndReadBack": true,
+  "hookId": "cf2e0807-5992-474b-88dc-f1e79f2074ad",
+  "deliveryUrl": "https://pmp-stripe-bridge.vercel.app/api/godaddy-webhook",
+  "subscribedEvents": [
+    "TRANSACTION_CAPTURED",
+    "TRANSACTION_UPDATED",
+    "TRANSACTION_REFUNDED",
+    "TRANSACTION_VOIDED"
+  ],
+  "positiveSignatureCheck": {
+    "passed": true,
+    "httpStatus": 200,
+    "type": "Signed non-payment configuration probe",
+    "queued": false
+  },
+  "negativeSignatureCheck": {
+    "passed": true,
+    "httpStatus": 401,
+    "type": "Same non-payment probe with invalid signature"
+  },
+  "result": "registered-signature-checks-passed",
+  "providerTransactionDeliveryObserved": false,
+  "cronSecretPresentAtTest": false,
+  "realPaymentsCreated": 0,
+  "shopifyOrdersCreated": 0,
+  "payoutsRequested": 0,
+  "paymentRoutingChanged": false,
+  "secretValuesLoggedOrCommitted": false,
+  "temporaryBuildCommandRemoved": true,
+  "cleanupCommit": "1ee7dc0a496606e63049ca4582e2851726abf134",
+  "activationFlags": {
+    "PMP_GODADDY_ENABLED": "0",
+    "PMP_GODADDY_REVIEW_APPROVED": "0",
+    "PMP_GODADDY_ACCEPTANCE_VERIFIED": "0"
+  },
+  "remainingBeforeFullMigration": [
+    "Complete and verify authenticated reconciliation processing; CRON_SECRET was absent during the check",
+    "Reconcile launch readiness with the webhook secret actually stored server-side",
+    "Verify merchant payment approval and the complete browser-to-payment-to-Shopify-order path",
+    "Activate and verify the storefront provider switch only after acceptance checks"
+  ],
+  "readyForProductionPaymentMigration": false
+}
