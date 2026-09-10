@@ -1,0 +1,11 @@
+{
+  "testedAt": "2026-09-10T15:52:28.140Z",
+  "scope": "Real production HTML and GoDaddy SDK; intercepted synthetic quote only",
+  "sdkMocked": false,
+  "quoteMocked": true,
+  "cardDataEntered": false,
+  "paymentRequestsAllowed": 0,
+  "cases": [],
+  "passed": false,
+  "error": "Hosted fields not present"
+}
