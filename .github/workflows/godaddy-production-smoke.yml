@@ -7,7 +7,7 @@ on:
       - scripts/godaddy-production-browser-smoke.mjs
       - .github/workflows/godaddy-production-smoke.yml
 permissions:
-  contents: write
+  contents: read
 concurrency:
   group: godaddy-production-smoke
   cancel-in-progress: true
@@ -21,30 +21,21 @@ jobs:
         with:
           node-version: '24'
       - name: Install isolated browser test dependency
-        run: npm install --no-save --ignore-scripts playwright && npx playwright install --with-deps chromium
+        run: npm install --no-save --package-lock=false --ignore-scripts playwright && npx playwright install --with-deps chromium
       - name: Native storefront to actual GoDaddy checkout, no monetary submissions
         id: smoke
         continue-on-error: true
         run: node scripts/godaddy-production-browser-smoke.mjs
-      - name: Preserve measured non-secret results
-        if: always()
-        run: |
-          if [ ! -f docs/godaddy-production-browser-smoke-20260910.json ]; then exit 0; fi
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add docs/godaddy-production-browser-smoke-20260910.json
-          if git diff --cached --quiet; then exit 0; fi
-          git commit -m 'Record actual native storefront GoDaddy launch smoke test'
-          git pull --rebase origin main
-          git push origin HEAD:main
-      - name: Save public-layout screenshots
+      - name: Preserve measured results and public-layout screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: godaddy-production-browser-smoke
-          path: artifacts/godaddy-launch
-          if-no-files-found: ignore
-          retention-days: 3
+          path: |
+            docs/godaddy-production-browser-smoke-20260910.json
+            artifacts/godaddy-launch
+          if-no-files-found: error
+          retention-days: 7
       - name: Require successful smoke check
         if: steps.smoke.outcome != 'success'
         run: exit 1
