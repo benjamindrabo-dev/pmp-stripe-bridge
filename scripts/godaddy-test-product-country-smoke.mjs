@@ -9,13 +9,17 @@ const roots={US:'',CA:'/en-ca',FR:'/fr-fr'};
 const report={testedAt:new Date().toISOString(),testVariant:TEST,cartMocked:false,sdkMocked:false,paymentsSubmitted:0,ordersCreated:0,cardDataEntered:false,cases:[]};
 let browser;
 async function anonymousCart(context,country,items){
- const root=roots[country];
- await context.request.get(SITE+(root||'')+'/');
+ const root=roots[country],product=SITE+root+'/products/test?variant='+TEST;
+ await context.request.get(product);
  const localized=await context.request.post(SITE+'/localization',{form:{form_type:'localization',_method:'put',country_code:country,return_to:root+'/cart'},maxRedirects:3});
- assert.ok(localized.status()<400,'LOCALIZATION_FAILED');
- await context.request.post(SITE+root+'/cart/clear.js',{data:{}});
- const add=await context.request.post(SITE+root+'/cart/add.js',{data:{items}});assert.ok(add.ok(),'CART_ADD_FAILED');
- const response=await context.request.get(SITE+root+'/cart.js');assert.ok(response.ok(),'CART_READ_FAILED');
+ assert.ok(localized.status()<400,'LOCALIZATION_FAILED_'+localized.status());
+ await context.request.post(SITE+root+'/cart/clear.js',{data:{},headers:{Referer:product}});
+ const add=await context.request.post(SITE+root+'/cart/add.js',{data:{items},headers:{Referer:product}});
+ if(!add.ok()){
+  let error={};try{error=await add.json();}catch{}
+  throw Error('CART_ADD_'+add.status()+':'+String(error.description||error.message||'No JSON description').slice(0,200));
+ }
+ const response=await context.request.get(SITE+root+'/cart.js');assert.ok(response.ok(),'CART_READ_FAILED_'+response.status());
  return response.json();
 }
 try{
@@ -41,7 +45,10 @@ try{
   const page=await context.newPage();
   try{
    item.stage='product-and-cart';
-   await page.goto(SITE+'/products/test?variant='+TEST,{waitUntil:'domcontentloaded',timeout:60000});
+   const product=await page.goto(SITE+'/products/test?variant='+TEST,{waitUntil:'domcontentloaded',timeout:60000});item.productHttp=product.status();
+   // Stop page-side locale initialization before controlled anonymous cart setup.
+   // The actual cart button and all checkout calls below remain unmodified.
+   await page.goto('about:blank');
    const cart=await anonymousCart(context,'US',scenario.items);
    item.sourceCurrency=cart.currency;item.sourceTotal=cart.total_price;
    await page.goto(SITE+'/cart',{waitUntil:'domcontentloaded',timeout:60000});
