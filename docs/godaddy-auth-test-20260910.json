@@ -1,0 +1,43 @@
+{
+  "testDateUtc": "2026-09-10T11:56:04.998Z",
+  "project": "pmp-stripe-bridge",
+  "branch": "prep/godaddy-payments-20260909",
+  "environment": "preview",
+  "testedCommit": "2f3b7a130e88e360f6c20f44eae54f195ac983a2",
+  "deploymentId": "dpl_HHbzWMhb6jZq7xtiPNDezwLBodXK",
+  "evidence": "Vercel build logs, GODADDY_AUTH_TEST output, retrieved 2026-09-10",
+  "result": "authentication-verified-store-unresolved",
+  "businessIdMatchesSuppliedAccount": true,
+  "applicationIdMatchesSuppliedAccount": true,
+  "privateKeyPresentInPreview": true,
+  "privateKeyFormatValid": true,
+  "authenticationSucceeded": true,
+  "merchantReadSucceeded": true,
+  "requests": [
+    {"operation": "token", "method": "POST", "httpStatus": 200},
+    {"operation": "business", "method": "GET", "httpStatus": 200}
+  ],
+  "businessApiStatus": "ACTIVATED",
+  "mockProcessor": false,
+  "storeIdsReturnedByBasicBusinessRead": [],
+  "storeReadSucceeded": false,
+  "paylinksReadSucceeded": false,
+  "blockingCode": "STORE_ID_NOT_RETURNED",
+  "interpretation": "The real application/private-key pair authenticated successfully and could read the expected merchant. The basic merchant response did not supply a Store ID. This is not proof that no store exists, that account review is complete, or that payment and payout capabilities are approved.",
+  "localAndVercelMockTests": {"passed": 57, "failed": 0, "realNetwork": false},
+  "realPaymentsExecuted": 0,
+  "realPaymentLinksCreated": 0,
+  "payoutsTested": false,
+  "secretValuesLogged": false,
+  "productionChangedByThisTest": false,
+  "migrationActivated": false,
+  "readyToMigrate": false,
+  "oneOffBuildCommandRemoved": true,
+  "cleanupCommit": "c8b8e465ae6eb5011c7c84679209a849ab6aa969",
+  "remaining": [
+    "Obtain and verify the correct Store ID and its currency",
+    "Verify read access to Pay Links for that store",
+    "Finish checkout, webhook and idempotent Shopify order synchronization",
+    "Run authorized end-to-end acceptance tests before any production activation"
+  ]
+}
