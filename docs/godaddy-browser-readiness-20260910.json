@@ -1,68 +1,84 @@
 {
-  "testedAt": "2026-09-10T15:59:30.966Z",
-  "scope": "Non-sensitive browser network/CSP diagnostics",
-  "cardFieldsInspected": false,
-  "cardDataEntered": false,
-  "monetaryRequestsAllowed": 0,
+  "testedAt": "2026-09-10T16:16:46.680Z",
+  "scope": "Production page and actual GoDaddy SDK with synthetic quote responses",
   "quoteMocked": true,
   "sdkMocked": false,
-  "cardReadinessVerified": false,
-  "network": [
+  "cardFrameContentsRead": false,
+  "cardDataEntered": false,
+  "paymentsSubmitted": 0,
+  "cases": [
     {
-      "url": "https://collect.commerce.godaddy.com/sdk.js",
-      "status": 200
+      "locale": "en",
+      "width": 1440,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "$107.97",
+      "chargeNotice": "Will be charged in CAD"
     },
     {
-      "url": "https://api.sardine.ai/assets/loader.min.js",
-      "failed": true
+      "locale": "fr",
+      "width": 390,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "107,97 $US",
+      "chargeNotice": "Le paiement sera débité en CAD"
     },
     {
-      "url": "https://collect.commerce.godaddy.com/utilities/index.html",
-      "status": 200
+      "locale": "de",
+      "width": 768,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "107,97 $",
+      "chargeNotice": "Die Zahlung wird in CAD abgebucht"
     },
     {
-      "url": "https://collect.commerce.godaddy.com/payment-form/index.html",
-      "status": 200
+      "locale": "es",
+      "width": 390,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "107,97 US$",
+      "chargeNotice": "El pago se cobrará en CAD"
     },
     {
-      "url": "https://collect.commerce.godaddy.com/utilities/assets/index-BX9oXA3Z.js",
-      "status": 200
+      "locale": "it",
+      "width": 1440,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "107,97 USD",
+      "chargeNotice": "Il pagamento sarà addebitato in CAD"
     },
     {
-      "url": "https://collect.commerce.godaddy.com/payment-form/assets/index-B01bFZgW.css",
-      "status": 200
+      "locale": "pt",
+      "width": 390,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "US$ 107,97",
+      "chargeNotice": "O pagamento será debitado em CAD"
     },
     {
-      "url": "https://collect.commerce.godaddy.com/payment-form/assets/index-Ce-VScqQ.js",
-      "status": 200
-    },
-    {
-      "url": "https://services.poynt.net/businesses/3cfdebe4-e85d-41e9-9b26-96002a0c8654/risk/recaptcha",
-      "status": 200
-    },
-    {
-      "url": "https://csp.godaddy.com/eventbus/web",
-      "status": 202
-    },
-    {
-      "url": "https://csp.godaddy.com/eventbus/web",
-      "status": 202
+      "locale": "ja",
+      "width": 390,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "$107.97",
+      "chargeNotice": "Will be charged in CAD"
     }
   ],
-  "csp": [
-    {
-      "directive": "script-src-elem",
-      "blocked": "https://api.sardine.ai/assets/loader.min.js"
-    }
-  ],
-  "sdkConstructorPresent": true,
-  "frameUrls": [
-    "https://checkout.puremajestypet.com/godaddy-checkout.html",
-    "https://collect.commerce.godaddy.com/utilities/index.html",
-    "https://collect.commerce.godaddy.com/payment-form/index.html",
-    "https://www.google.com/recaptcha/enterprise/anchor",
-    "nullblank",
-    "nullblank"
-  ],
-  "result": "network-inspection-complete"
+  "passed": true,
+  "successfulCases": 7,
+  "finishedAt": "2026-09-10T16:16:54.385Z"
 }
