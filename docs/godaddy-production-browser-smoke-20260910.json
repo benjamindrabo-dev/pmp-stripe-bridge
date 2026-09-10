@@ -1,0 +1,79 @@
+{
+  "startedAt": "2026-09-10T16:45:38.398Z",
+  "test": "production-native-button-to-godaddy",
+  "cartMocked": false,
+  "sdkMocked": false,
+  "paymentRequestsBlocked": true,
+  "cardDataEntered": false,
+  "paymentsSubmitted": 0,
+  "ordersCreated": 0,
+  "cases": [
+    {
+      "name": "canada-collagen",
+      "country": "CA",
+      "width": 1440,
+      "passed": false,
+      "stage": "native-checkout-button",
+      "cartAddStatus": 200,
+      "cartCurrency": "CAD",
+      "cartTotalMinor": 4500,
+      "cartQuantity": 1,
+      "visibleButtons": [
+        "",
+        "Canada · CAD",
+        "",
+        "",
+        "Decrease quantity",
+        "Increase quantity",
+        "Remove",
+        "Buy Now",
+        "",
+        "",
+        "Add to cart",
+        ""
+      ],
+      "error": "CHECKOUT_BUTTON_NOT_FOUND",
+      "stoppedAt": "https://www.puremajestypet.com/en-ca/cart"
+    },
+    {
+      "name": "us-four-products",
+      "country": "US",
+      "width": 390,
+      "passed": false,
+      "stage": "native-checkout-button",
+      "cartAddStatus": 200,
+      "cartCurrency": "USD",
+      "cartTotalMinor": 10797,
+      "cartQuantity": 4,
+      "visibleButtons": [
+        "",
+        "United States · USD",
+        "",
+        "",
+        "Decrease quantity",
+        "Increase quantity",
+        "Remove",
+        "Decrease quantity",
+        "Increase quantity",
+        "Remove",
+        "Decrease quantity",
+        "Increase quantity"
+      ],
+      "error": "CHECKOUT_BUTTON_NOT_FOUND",
+      "stoppedAt": "https://www.puremajestypet.com/cart"
+    }
+  ],
+  "health": {
+    "provider": "godaddy",
+    "apiAccessVerified": true,
+    "webhookConfigurationVerified": true,
+    "chargeCurrency": "CAD",
+    "launchEnabled": true,
+    "newCheckoutRouting": "godaddy",
+    "providerReviewVerified": false,
+    "payoutAvailabilityVerified": false,
+    "monetaryRequestsPerformed": 0
+  },
+  "finishedAt": "2026-09-10T16:46:01.868Z",
+  "passed": false
+}
