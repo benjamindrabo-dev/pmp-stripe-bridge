@@ -1137,6 +1137,7 @@ const JS = String.raw`(function(){
     function selectedCountry(){
       var selector = document.querySelector('#PmpHeaderCountrySelectorV3');
       var value = selector && String(selector.value || '').trim().toUpperCase();
+      if (!/^[A-Z]{2}$/.test(value || '')) value = String(window.Shopify && window.Shopify.country || '').toUpperCase();
       return /^[A-Z]{2}$/.test(value) ? value : null;
     }
 
@@ -1206,7 +1207,19 @@ const JS = String.raw`(function(){
           var response=await nativeFetch(root+'cart.js',{cache:'no-store',headers:{Accept:'application/json'},signal:AbortSignal.timeout(8000)});
           if(!response.ok)throw new Error('cart');
           var cart=await response.json();
-          payload.pmp_cart={token:typeof cart.token==='string'?cart.token.split('?')[0]:null,currency:cart.currency,total_price:cart.total_price,items_subtotal_price:cart.items_subtotal_price,item_count:cart.item_count,cart_level_discount_applications:(cart.cart_level_discount_applications||[]).map(function(d){return {total_allocated_amount:d.total_allocated_amount};}),items:(cart.items||[]).map(function(i){return {variant_id:i.variant_id||i.id,quantity:i.quantity,final_line_price:i.final_line_price,original_line_price:i.original_line_price,product_title:i.product_title||i.title,image:typeof i.image==='string'?i.image:null,selling_plan_allocation:!!i.selling_plan_allocation};})};
+          /* Preserve Shopify discount identifiers for independent server recalculation. */
+          payload.pmp_cart={
+            token:typeof cart.token==='string'?cart.token.split('?')[0]:null,
+            currency:cart.currency,total_price:cart.total_price,items_subtotal_price:cart.items_subtotal_price,item_count:cart.item_count,
+            discount_codes:(cart.discount_codes||[]).map(function(d){return {code:d.code,applicable:d.applicable};}),
+            cart_level_discount_applications:(cart.cart_level_discount_applications||[]).map(function(d){return {total_allocated_amount:d.total_allocated_amount,type:d.type,title:d.type==='discount_code'?d.title:undefined};}),
+            items:(cart.items||[]).map(function(i){
+              var properties={};
+              ['Bundle offer','_pmp_bundle','_pmp_offer_total_cents'].forEach(function(key){var value=i.properties&&i.properties[key];if(typeof value==='string'&&value.length<=250)properties[key]=value;});
+              return {variant_id:i.variant_id||i.id,quantity:i.quantity,final_line_price:i.final_line_price,original_line_price:i.original_line_price,product_title:i.product_title||i.title,image:typeof i.image==='string'?i.image:null,selling_plan_allocation:!!i.selling_plan_allocation,properties:properties,
+                line_level_discount_allocations:(i.line_level_discount_allocations||[]).map(function(a){var d=a.discount_application||{};return {discount_application:{type:d.type,title:d.type==='discount_code'?d.title:undefined}};})};
+            })
+          };
           payload.storefront_root=root;payload.locale=(window.Shopify&&window.Shopify.locale)||document.documentElement.lang||'en';
         }catch(_){delete payload.pmp_cart;}
         nextInit.body=JSON.stringify(payload);
@@ -1225,7 +1238,8 @@ const JS = String.raw`(function(){
           if (data && data.provider === 'square' && data.sessionId && data.checkoutUrl) {
             var squareUrl = new URL(data.checkoutUrl);
             if (!['https://pmp-stripe-bridge.vercel.app','https://checkout.puremajestypet.com'].includes(squareUrl.origin) || !['/square-checkout.html','/godaddy-checkout.html'].includes(squareUrl.pathname)) throw new Error('Invalid checkout URL');
-            beginCheckout(data);
+            // Optional analytics must never prevent a valid checkout redirect.
+            try { beginCheckout(data); } catch (_) {}
             window.location.assign(squareUrl.href);
             // Stop legacy Stripe mounting while this document navigates away.
             return new Promise(function(){});
