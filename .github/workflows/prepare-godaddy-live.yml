@@ -1,0 +1,41 @@
+name: Prepare and test GoDaddy live routing
+on:
+  push:
+    branches: [release/godaddy-live-20260910]
+    paths:
+      - .github/workflows/prepare-godaddy-live.yml
+      - scripts/prepare-godaddy-live-routing.py
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install existing dependencies
+        run: npm install --ignore-scripts --no-audit --no-fund
+      - name: Apply exact reviewed source changes
+        run: python3 scripts/prepare-godaddy-live-routing.py
+      - name: Verify syntax and focused existing tests
+        run: |
+          node --check lib/godaddy-embedded.js
+          node --check lib/godaddy-embedded-core.js
+          node --check lib/godaddy-cart.js
+          node --check api/godaddy-entry.js
+          node --check api/godaddy-webhook.js
+          node --check api/create-checkout.js
+          node --check api/meta-offer-summary.js
+          node --test test/godaddy-payments.test.js test/godaddy-auth-test.test.js test/godaddy-charge-presentation.test.js
+          git diff --check
+      - name: Commit staged source only; activation flags remain disabled
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add lib/godaddy-embedded.js lib/godaddy-embedded-core.js lib/godaddy-cart.js api/create-checkout.js api/meta-offer-summary.js vercel.json
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Wire GoDaddy cart handoff and verified hook readiness; keep launch disabled'
+          git push origin HEAD:release/godaddy-live-20260910
