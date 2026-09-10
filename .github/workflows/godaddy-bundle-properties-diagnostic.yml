@@ -1,0 +1,20 @@
+name: Diagnose GoDaddy bundle transfer
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/godaddy-bundle-properties-diagnostic.mjs
+      - .github/workflows/godaddy-bundle-properties-diagnostic.yml
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify actual bundle cart response and GoDaddy quote
+        run: node scripts/godaddy-bundle-properties-diagnostic.mjs
