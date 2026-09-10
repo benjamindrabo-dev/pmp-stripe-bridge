@@ -1,13 +1,12 @@
 import {createFromSnapshot} from '../lib/godaddy-cart.js';
 import {promotion,loadCart,canPrepare} from '../lib/godaddy-embedded.js';
-import {compactCart} from '../public/godaddy-cart-snapshot.js';
+import {compactCart,appliedDiscountCodes} from '../public/godaddy-cart-snapshot.js';
 import {resolveLocale} from '../public/godaddy-cart-contract.js';
 import {deterministicEventId} from '../lib/omnisend.js';
 
 const ORIGINS=['https://www.puremajestypet.com','https://puremajestypet.com','https://checkout.puremajestypet.com','https://pmp-stripe-bridge.vercel.app'];
 function rejection(res,status,code,body,error){
- // Codes and structural context only. Never log the cart, customer data, tokens,
- // headers, amounts or URLs. This distinguishes a cart rejection from a dead CTA.
+ // Codes and structural context only. No cart, customer data, tokens or prices.
  const country=String(body?.checkout_country||'').toUpperCase();
  const currency=String(body?.pmp_cart?.currency||body?.currency||'').toUpperCase();
  console.warn('GODADDY_CART_REJECT',JSON.stringify({code,status,country:/^[A-Z]{2}$/.test(country)?country:null,currency:/^[A-Z]{3}$/.test(currency)?currency:null,hasSnapshot:!!body?.pmp_cart,lines:Array.isArray(body?.pmp_cart?.items)?body.pmp_cart.items.length:Array.isArray(body?.items)?body.items.length:null}));
@@ -15,8 +14,6 @@ function rejection(res,status,code,body,error){
 }
 export function checkoutSnapshot(body){
  if(body.pmp_cart)return compactCart(body.pmp_cart);
- // Old storefront tabs may not yet carry the Ajax snapshot. The server will
- // independently reconstruct this merchandise in Shopify before trusting it.
  if(!Array.isArray(body.items)||!body.items.length||body.items.length>50)throw Object.assign(new Error('INVALID_CART'),{code:'INVALID_CART',status:400});
  const items=body.items.map(i=>{
   if(!Number.isSafeInteger(Number(i.price_cents))||Number(i.price_cents)<0||!Number.isSafeInteger(Number(i.quantity))||Number(i.quantity)<1||Number(i.quantity)>50)throw Object.assign(new Error('INVALID_CART'),{code:'INVALID_CART',status:400});
@@ -38,25 +35,25 @@ export default async function handler(req,res){
  if(!origin||!String(req.headers['content-type']||'').startsWith('application/json')||!req.body||typeof req.body!=='object'||Array.isArray(req.body)||Buffer.byteLength(JSON.stringify(req.body))>64000)return rejection(res,400,'INVALID_REQUEST',req.body);
  if(!canPrepare())return rejection(res,503,'GODADDY_CHECKOUT_DISABLED',req.body,'Secure checkout is not available yet.');
  try{
-  const body=req.body,country=String(body.checkout_country||'').toUpperCase();
+  const body=req.body,country=String(body.checkout_country||'').toUpperCase(),snapshot=checkoutSnapshot(body);
   const locale=resolveLocale(body.locale);
-  let result=await createFromSnapshot({cart:checkoutSnapshot(body),country,locale,storefrontRoot:body.storefront_root,attribution:{...body,shopify_cart_url:body.shopify_cart_url}});
+  let result=await createFromSnapshot({cart:snapshot,country,locale,storefrontRoot:body.storefront_root,attribution:{...body,shopify_cart_url:body.shopify_cart_url}});
   const meta=String(body.utm_source||'').toLowerCase()==='meta'&&String(body.utm_medium||'').toLowerCase()==='paid_social'&&String(body.utm_campaign||'').toLowerCase()==='liquid_retargeting_product_view';
   const code=String(body.promotion_code||(meta?'WELCOME20':'')).trim().toUpperCase();
-  if(code){
+  // createFromSnapshot has independently revalidated the original discount in
+  // Shopify. Its exact rounded amount is already inside this quote.
+  if(code&&!appliedDiscountCodes(snapshot).some(c=>c.toUpperCase()===code)){
    const q=await promotion(result.sessionId,{code,email:body.email});
    const cart=await loadCart(q.sessionId);const url=new URL(result.checkoutUrl);url.searchParams.set('session_id',q.sessionId);
    result={...result,sessionId:q.sessionId,checkoutUrl:url.href,amountTotal:q.total,analytics:{beginCheckout:{eventId:deterministicEventId('begin checkout',q.sessionId),currency:cart.displayCurrency,value:cart.subtotal/100,items:cart.items.map(i=>({item_id:String(i.variant_id),item_name:i.title,quantity:i.quantity,price:i.price_cents/100}))}}};
   }
   if(!body.pmp_cart){
-   // Older loaded helpers validate BOTH this original origin and path. Keep
-   // them unchanged; the gd_-specific rewrite still serves GoDaddy securely.
+   // Older helpers validate both the original origin and path. The gd_-specific
+   // rewrite serves GoDaddy; genuine Square sessions stay with their processor.
    const original=new URL(result.checkoutUrl);
    const compatible=new URL('/square-checkout.html','https://pmp-stripe-bridge.vercel.app');
    compatible.search=original.search;result={...result,checkoutUrl:compatible.href};
   }
-  // "square" is the original storefront redirect discriminator, not the
-  // processor. paymentProvider unambiguously identifies the actual processor.
   return res.status(200).json({...result,provider:'square',paymentProvider:'godaddy'});
  }catch(e){const code=/^[A-Z_]+$/.test(e.code||'')?e.code:'CHECKOUT_UNAVAILABLE';return rejection(res,e.status||503,code,req.body,'Please refresh your cart and try again. No payment has been submitted.');}
 }
