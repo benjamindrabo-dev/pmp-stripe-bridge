@@ -1,0 +1,36 @@
+name: GoDaddy browser readiness
+on:
+  push:
+    branches: [release/godaddy-live-20260910]
+    paths:
+      - .github/workflows/godaddy-browser-readiness.yml
+      - scripts/godaddy-live-ui-qa.mjs
+permissions:
+  contents: write
+jobs:
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install browser test dependency
+        run: npm install --no-save --ignore-scripts playwright && npx playwright install --with-deps chromium
+      - name: Read the actual hosted card form without entering or submitting card data
+        id: browser
+        continue-on-error: true
+        run: node scripts/godaddy-live-ui-qa.mjs
+      - name: Save measured report without secrets or customer data
+        if: always()
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add docs/godaddy-browser-readiness-20260910.json
+          git commit -m 'Record measured GoDaddy hosted-form browser readiness' || exit 0
+          git pull --rebase origin release/godaddy-live-20260910
+          git push origin HEAD:release/godaddy-live-20260910
+      - name: Require passing browser checks
+        if: steps.browser.outcome != 'success'
+        run: exit 1
