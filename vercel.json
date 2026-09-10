@@ -1,5 +1,6 @@
 {
  "$schema":"https://openapi.vercel.sh/vercel.json",
+ "buildCommand":"node scripts/godaddy-live-cart-qa.mjs --run",
  "env":{
   "GODADDY_BUSINESS_ID":"3cfdebe4-e85d-41e9-9b26-96002a0c8654",
   "GODADDY_APPLICATION_ID":"urn:aid:8982d4de-1db8-40dc-b7a2-211222a2325f",
@@ -21,7 +22,7 @@
   "api/square-pay.js":{"maxDuration":60},"api/square-checkout.js":{"maxDuration":60},
   "api/square-webhook.js":{"maxDuration":60},"api/create-checkout.js":{"maxDuration":60},
   "api/session-status.js":{"maxDuration":60},"api/stripe-checkout.js":{"maxDuration":60},
-  "api/stripe-webhook.js":{"maxDuration":60}
+  "api/stripe-webhook.js":{"maxDuration":60},"api/godaddy-cart.js":{"maxDuration":60}
  },
  "crons":[{"path":"/api/ads-backfill","schedule":"0 */3 * * *"}]
 }
