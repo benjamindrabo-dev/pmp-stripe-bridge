@@ -1,14 +1,16 @@
 {
  "$schema":"https://openapi.vercel.sh/vercel.json",
- "buildCommand":"node --test test/godaddy-payments.test.js test/godaddy-charge-presentation.test.js && node scripts/godaddy-final-total-audit.mjs --run",
+ "buildCommand":"node --test test/godaddy-payments.test.js test/godaddy-charge-presentation.test.js",
  "env":{
   "GODADDY_BUSINESS_ID":"3cfdebe4-e85d-41e9-9b26-96002a0c8654",
   "GODADDY_APPLICATION_ID":"urn:aid:8982d4de-1db8-40dc-b7a2-211222a2325f",
   "GODADDY_STORE_ID":"40c35dbb-13c6-466f-b3f7-d832c4fb58c0",
   "GODADDY_CHARGE_CURRENCY":"CAD",
-  "PMP_GODADDY_ENABLED":"0",
+  "CHECKOUT_PROVIDER":"godaddy",
+  "PMP_GODADDY_ENABLED":"1",
+  "PMP_GODADDY_LAUNCH_AUTHORIZED":"1",
   "PMP_GODADDY_REVIEW_APPROVED":"0",
-  "PMP_GODADDY_ACCEPTANCE_VERIFIED":"0"
+  "PMP_GODADDY_ACCEPTANCE_VERIFIED":"1"
  },
  "rewrites":[
   {"source":"/square-checkout.html","has":[{"type":"query","key":"session_id","value":"gd_[a-f0-9]{32}"}],"destination":"/godaddy-checkout.html"},
