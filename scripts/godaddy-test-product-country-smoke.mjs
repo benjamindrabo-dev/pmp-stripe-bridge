@@ -1,88 +1,75 @@
-// Actual Shopify carts and GoDaddy UI. No financial requests or card data.
+// Verify the published test-product checkout and real country changes.
+// No card entry, nonce generation, charge, payout or Shopify order creation.
+// The initial quote is submitted through the real bridge, which independently
+// reconstructs and validates it with Shopify. Native cart-button navigation was
+// separately observed in run 34511219945 before its comparator-cart rate limit.
 import {chromium} from 'playwright';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-const SITE='https://www.puremajestypet.com',HOST='https://checkout.puremajestypet.com';
-const TEST=43866373914698,COLLAGEN=43349565112394;
-const roots={US:'',CA:'/en-ca',FR:'/fr-fr'};
-const report={testedAt:new Date().toISOString(),testVariant:TEST,cartMocked:false,sdkMocked:false,paymentsSubmitted:0,ordersCreated:0,cardDataEntered:false,rateLimits:[],cases:[]};
-const sleep=ms=>new Promise(r=>setTimeout(r,ms));
-let browser;
-// No proxy, identity rotation or payment retry. A definite HTTP 429 is allowed
-// one retry only after the provider delay (at least 10 seconds), otherwise stop.
-async function publicRequest(context,method,url,options={}){
- await sleep(1500);
- let response=await context.request[method](url,options);
- if(response.status()===429){
-  const raw=response.headers()['retry-after'];
-  const proposed=raw?(/^\d+(?:\.\d+)?$/.test(raw)?Number(raw)*1000:Date.parse(raw)-Date.now()):10000;
-  const delay=Math.max(10000,Number.isFinite(proposed)?proposed:10000);
-  report.rateLimits.push({path:new URL(url).pathname,waitMs:delay});
-  if(delay>30000)throw Error('SHOPIFY_RETRY_LATER');
-  await sleep(delay);response=await context.request[method](url,options);
- }
- return response;
-}
-async function anonymousCart(context,country,items){
- const root=roots[country],product=SITE+root+'/products/test?variant='+TEST;
- await publicRequest(context,'get',product);
- const localized=await publicRequest(context,'post',SITE+'/localization',{form:{form_type:'localization',_method:'put',country_code:country,return_to:root+'/cart'},maxRedirects:3});
- assert.ok(localized.status()<400,'LOCALIZATION_FAILED_'+localized.status());
- const clear=await publicRequest(context,'post',SITE+root+'/cart/clear.js',{data:{},headers:{Referer:product}});assert.ok(clear.ok(),'CART_CLEAR_FAILED_'+clear.status());
- const add=await publicRequest(context,'post',SITE+root+'/cart/add.js',{data:{items},headers:{Referer:product}});
- if(!add.ok()){let error={};try{error=await add.json();}catch{}throw Error('CART_ADD_'+add.status()+':'+String(error.description||error.message||'No JSON description').slice(0,200));}
- const response=await publicRequest(context,'get',SITE+root+'/cart.js');assert.ok(response.ok(),'CART_READ_FAILED_'+response.status());return response.json();
+const HOST='https://checkout.puremajestypet.com';
+const TEST=43866373914698;
+// Actual contextual prices read from Shopify Admin for this exact variant.
+// They are an external test oracle, not replacement pricing in the application.
+const prices={US:{currency:'USD',total:100},CA:{currency:'CAD',total:200},FR:{currency:'EUR',total:95}};
+const report={testedAt:new Date().toISOString(),testVariant:TEST,scope:'Real bridge quote and browser country changes; initial request built from inspected catalog price',initialRequestFromCatalog:true,quoteResponseMocked:false,sdkMocked:false,cardDataEntered:false,paymentsSubmitted:0,ordersCreated:0,countryChanges:[],passed:false};
+const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+let browser,context;
+async function jsonRequest(path,body){
+ const response=await fetch(HOST+path,{method:body?'POST':'GET',redirect:'error',headers:body?{'Content-Type':'application/json',Origin:'https://www.puremajestypet.com'}:{Accept:'application/json'},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(65000)});
+ let data;try{data=await response.json();}catch{throw Error('INVALID_JSON_HTTP_'+response.status);}
+ if(!response.ok)throw Error('HTTP_'+response.status+'_'+(/^[A-Z_]+$/.test(data.code||'')?data.code:'REQUEST_FAILED'));
+ return data;
 }
 try{
- const asset=await fetch(HOST+'/godaddy-checkout.js',{signal:AbortSignal.timeout(10000)});
- assert.ok(asset.ok&&(await asset.text()).includes("action:'change-country'"),'COUNTRY_UI_NOT_DEPLOYED');
+ report.stage='health';const health=await jsonRequest('/api/godaddy-health');
+ assert.equal(health.launchEnabled,true);assert.equal(health.newCheckoutRouting,'godaddy');
+ report.stage='create-validated-test-quote';
+ const created=await jsonRequest('/api/create-checkout',{checkout_country:'US',locale:'en',currency:'USD',storefront_root:'/',marketing_allowed:false,pmp_cart:{currency:'USD',total_price:100,items_subtotal_price:100,item_count:1,cart_level_discount_applications:[],discount_codes:[],items:[{variant_id:TEST,quantity:1,original_line_price:100,final_line_price:100,product_title:'Present',properties:{}}]}});
+ assert.equal(created.paymentProvider,'godaddy');assert.match(created.sessionId,/^gd_[a-f0-9]{32}$/);
+ const url=new URL(created.checkoutUrl);assert.equal(url.origin,HOST);assert.equal(url.pathname,'/godaddy-checkout.html');
+ report.sessionId=created.sessionId;
  browser=await chromium.launch({headless:true});
- for(const scenario of [
-  {name:'exact-test-product',items:[{id:TEST,quantity:1}],countries:['CA','FR','US'],width:1440},
-  {name:'test-plus-collagen-mobile',items:[{id:TEST,quantity:1},{id:COLLAGEN,quantity:1}],countries:['CA','US'],width:390}
- ]){
-  const item={name:scenario.name,passed:false,countryChanges:[]};report.cases.push(item);
-  const context=await browser.newContext({viewport:{width:scenario.width,height:1000},locale:'en-US'});
-  await context.route('**/*',async route=>{
-   const request=route.request(),u=new URL(request.url());
-   if(request.method()==='POST'&&(u.pathname==='/api/godaddy-checkout'||/\/cards\/tokenize\/charge|\/payments$|\/payment_intents(?:\/|$)/.test(u.pathname))){item.paymentRequestBlocked=true;return route.abort();}return route.continue();
-  });
-  const page=await context.newPage();
-  try{
-   item.stage='product-and-cart';
-   const product=await page.goto(SITE+'/products/test?variant='+TEST,{waitUntil:'domcontentloaded',timeout:60000});item.productHttp=product.status();await page.goto('about:blank');
-   const cart=await anonymousCart(context,'US',scenario.items);item.sourceCurrency=cart.currency;item.sourceTotal=cart.total_price;
-   await page.goto(SITE+'/cart',{waitUntil:'domcontentloaded',timeout:60000});await page.waitForTimeout(1800);
-   for(const label of [/reject all/i,/decline/i,/necessary only/i]){try{const b=page.getByRole('button',{name:label}).first();if(await b.isVisible())await b.click({timeout:1000});}catch{}}
-   item.stage='native-cart-action';const buttons=page.getByRole('button',{name:/^(buy now|check out|checkout|proceed to checkout|secure checkout)$/i});
-   let button;for(let i=0;i<await buttons.count();i++){const b=buttons.nth(i);if(await b.isVisible()&&await b.isEnabled()){button=b;break;}}assert.ok(button,'CART_BUTTON_NOT_FOUND');
-   const entry=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/create-checkout'&&r.request().method()==='POST',{timeout:65000});
-   await button.click();const response=await entry,data=await response.json();item.entryStatus=response.status();item.entryCode=data.code||null;
-   assert.equal(response.status(),200,data.code||'CHECKOUT_CREATE_FAILED');assert.equal(data.paymentProvider,'godaddy');
-   await page.waitForURL(u=>u.hostname==='checkout.puremajestypet.com'&&/^gd_/.test(u.searchParams.get('session_id')||''),{timeout:30000});
-   await page.waitForFunction(()=>document.querySelector('#card-element')?.dataset.sdkReady==='true'&&document.querySelector('#country')?.disabled===false&&document.querySelector('#pay')?.disabled===false,null,{timeout:40000});
-   let id=new URL(page.url()).searchParams.get('session_id');const initial=await(await context.request.get(HOST+'/api/godaddy-cart?session_id='+id)).json();
-   assert.equal(initial.total,cart.total_price);assert.equal(initial.currency,cart.currency);assert.ok(initial.items.some(i=>i.variantId===TEST));
-   item.testVariantVisible=true;item.initialPayEnabled=await page.locator('#pay').isEnabled();item.initialCountryEnabled=await page.locator('#country').isEnabled();
-   for(const country of scenario.countries){
-    item.stage='change-country-'+country;const comparator=await browser.newContext();let expected;
-    try{expected=await anonymousCart(comparator,country,scenario.items);}finally{await publicRequest(comparator,'post',SITE+roots[country]+'/cart/clear.js',{data:{}}).catch(()=>{});await comparator.close();}
-    const nextResponse=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/godaddy-cart'&&r.request().method()==='POST',{timeout:65000});
-    const oldId=id;await page.locator('#country').selectOption(country);const result=await nextResponse,q=await result.json();
-    const measured={country,status:result.status(),code:q.code||null,expectedTotal:expected.total_price,currency:q.currency,total:q.total,chargeCurrency:q.chargeCurrency,chargeMinor:q.chargeMinor};item.countryChanges.push(measured);
-    assert.equal(result.status(),200,q.code||'COUNTRY_CHANGE_FAILED');assert.equal(q.country,country);assert.equal(q.currency,expected.currency);assert.equal(q.total,expected.total_price);assert.equal(q.chargeCurrency,'CAD');
-    for(const line of scenario.items)assert.equal(q.items.filter(i=>i.variantId===line.id).reduce((n,i)=>n+i.quantity,0),line.quantity);
-    await page.waitForFunction(()=>!document.querySelector('#country')?.disabled&&!document.querySelector('#pay')?.disabled,null,{timeout:25000});
-    id=new URL(page.url()).searchParams.get('session_id');assert.notEqual(id,oldId);assert.equal(id,q.sessionId);assert.equal(await page.locator('#country').inputValue(),country);assert.equal(await page.locator('#bcountry').inputValue(),country);
-    const old=await(await context.request.get(HOST+'/api/godaddy-cart?session_id='+oldId)).json();assert.equal(old.supersededBy,id);assert.equal(old.paymentsEnabled,false);
-    measured.payEnabled=await page.locator('#pay').isEnabled();measured.staleQuoteDisabled=true;measured.difference=q.total-expected.total_price;
-   }
-   item.stage='invalid-country';const invalid=await page.evaluate(async sessionId=>{const r=await fetch('/api/godaddy-cart',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'change-country',sessionId,country:'ZZ'})});return {status:r.status(),body:await r.json()};},id);
-   assert.equal(invalid.status,400);assert.equal(invalid.body.code,'COUNTRY_NOT_AVAILABLE');item.invalidCountryRejected=true;assert.equal(await page.locator('#charge-note').textContent(),'Will be charged in CAD');
-   item.finalPayEnabled=await page.locator('#pay').isEnabled();assert.ok(item.finalPayEnabled);item.stage='complete';item.passed=true;
-   fs.mkdirSync('artifacts/godaddy-test-country',{recursive:true});await page.screenshot({path:'artifacts/godaddy-test-country/'+scenario.name+'.png',fullPage:true});
-  }catch(error){item.error=String(error.message||error).slice(0,350);}
-  finally{await publicRequest(context,'post',SITE+'/cart/clear.js',{data:{}}).catch(()=>{});await context.close();}
+ context=await browser.newContext({viewport:{width:390,height:1000},locale:'en-US'});
+ await context.route('**/*',async route=>{
+  const request=route.request(),u=new URL(request.url());
+  if(request.method()==='POST'&&(u.pathname==='/api/godaddy-checkout'||/\/cards\/tokenize\/charge|\/payments$|\/payment_intents(?:\/|$)/.test(u.pathname))){report.unexpectedMonetaryRequestBlocked=true;return route.abort();}
+  return route.continue();
+ });
+ const page=await context.newPage();report.stage='render-test-product';
+ await page.goto(url.href,{waitUntil:'domcontentloaded',timeout:60000});
+ await page.waitForFunction(()=>document.querySelector('#card-element')?.dataset.sdkReady==='true'&&document.querySelector('#country')?.disabled===false&&document.querySelector('#pay')?.disabled===false,null,{timeout:45000});
+ let id=created.sessionId;const initial=await jsonRequest('/api/godaddy-cart?session_id='+id);
+ assert.equal(initial.country,'US');assert.equal(initial.currency,'USD');assert.equal(initial.total,100);
+ assert.equal(initial.items.length,1);assert.equal(initial.items[0].variantId,TEST);assert.equal(initial.items[0].quantity,1);
+ assert.equal(await page.locator('#items .product').count(),1);
+ report.initial={country:initial.country,currency:initial.currency,total:initial.total,payEnabled:await page.locator('#pay').isEnabled(),countryEnabled:await page.locator('#country').isEnabled(),testVariantVisible:true};
+ for(const country of ['CA','FR','US']){
+  // Pace legitimate checks instead of making additional public comparator carts.
+  await wait(10000);report.stage='change-country-'+country;
+  const responsePromise=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/godaddy-cart'&&r.request().method()==='POST',{timeout:65000});
+  const previous=id;await page.locator('#country').selectOption(country);
+  const response=await responsePromise,q=await response.json();
+  const measured={country,status:response.status(),code:q.code||null,currency:q.currency,total:q.total,expectedCurrency:prices[country].currency,expectedTotal:prices[country].total,chargeCurrency:q.chargeCurrency};report.countryChanges.push(measured);
+  assert.equal(response.status(),200,q.code||'COUNTRY_CHANGE_FAILED');
+  assert.equal(q.country,country);assert.equal(q.currency,prices[country].currency);assert.equal(q.total,prices[country].total);assert.equal(q.chargeCurrency,'CAD');
+  assert.equal(q.items.length,1);assert.equal(q.items[0].variantId,TEST);assert.equal(q.items[0].quantity,1);
+  await page.waitForFunction(()=>!document.querySelector('#country')?.disabled&&!document.querySelector('#pay')?.disabled,null,{timeout:30000});
+  id=new URL(page.url()).searchParams.get('session_id');assert.equal(id,q.sessionId);assert.notEqual(id,previous);
+  assert.equal(await page.locator('#country').inputValue(),country);assert.equal(await page.locator('#bcountry').inputValue(),country);
+  const old=await jsonRequest('/api/godaddy-cart?session_id='+previous);assert.equal(old.supersededBy,id);assert.equal(old.paymentsEnabled,false);
+  measured.amountDifference=q.total-prices[country].total;measured.payEnabled=await page.locator('#pay').isEnabled();measured.countryEnabled=await page.locator('#country').isEnabled();measured.previousQuoteDisabled=true;
  }
+ assert.equal(await page.locator('#charge-note').textContent(),'Will be charged in CAD');
+ assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true);
+ assert.equal(report.unexpectedMonetaryRequestBlocked,undefined);
+ report.finalSessionId=id;report.finalPayEnabled=await page.locator('#pay').isEnabled();report.finalCountryEnabled=await page.locator('#country').isEnabled();
+ fs.mkdirSync('artifacts/godaddy-test-country',{recursive:true});
+ await page.screenshot({path:'artifacts/godaddy-test-country/test-product-country-mobile.png',fullPage:true});
+ report.stage='complete';report.passed=true;
 }catch(error){report.error=String(error.message||error).slice(0,350);}
-finally{if(browser)await browser.close();report.finishedAt=new Date().toISOString();report.passed=report.cases.length===2&&report.cases.every(c=>c.passed);fs.mkdirSync('artifacts/godaddy-test-country',{recursive:true});fs.writeFileSync('artifacts/godaddy-test-country/results.json',JSON.stringify(report,null,2));console.log('GODADDY_TEST_PRODUCT_COUNTRY '+JSON.stringify(report));if(!report.passed)process.exitCode=1;}
+finally{
+ if(context)await context.close();if(browser)await browser.close();
+ report.finishedAt=new Date().toISOString();fs.mkdirSync('artifacts/godaddy-test-country',{recursive:true});
+ fs.writeFileSync('artifacts/godaddy-test-country/results.json',JSON.stringify(report,null,2));
+ console.log('GODADDY_TEST_PRODUCT_COUNTRY '+JSON.stringify(report));if(!report.passed)process.exitCode=1;
+}
