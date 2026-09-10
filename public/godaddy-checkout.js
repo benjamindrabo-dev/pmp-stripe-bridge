@@ -2,6 +2,7 @@
 (async()=>{
 'use strict';
 const {dictionary,resolveLocale}=await import('/godaddy-checkout-i18n.js');
+const {chargePresentation}=await import('/godaddy-charge-presentation.js');
 const $=id=>document.getElementById(id),params=new URLSearchParams(location.search);
 let id=params.get('session_id')||'',quote=null,collect=null,ready=false,busy=false,prepared=null,settled=false;
 let lang=resolveLocale(params.get('lang'),navigator.languages),t=dictionary(lang);
@@ -16,7 +17,7 @@ function translate(){document.documentElement.lang=lang;t=dictionary(lang);for(c
 translate();
 const money=(n,currency)=>new Intl.NumberFormat(lang,{style:'currency',currency}).format(n/100);
 function message(text,success=false){$('status').textContent=text;$('status').className=success?'status succeeded':'status';}
-function controls(){const disabled=busy||settled||!quote;$('pay').disabled=disabled||!ready||quote?.paymentsEnabled!==true;$('pay-label').textContent=settled?t.received:busy?t.processing:quote?(quote.paymentsEnabled?t.pay+' '+money(quote.chargeMinor,quote.chargeCurrency):t.preview):t.loading;for(const node of document.querySelectorAll('#apply-promo,#dental-upsell button,.remove-addon'))node.disabled=disabled;}
+function controls(){const disabled=busy||settled||!quote;$('pay').disabled=disabled||!ready||quote?.paymentsEnabled!==true;$('pay-label').textContent=settled?t.received:busy?t.processing:quote?(quote.paymentsEnabled?chargePresentation(quote,lang,t.pay).payButton:t.preview):t.loading;for(const node of document.querySelectorAll('#apply-promo,#dental-upsell button,.remove-addon'))node.disabled=disabled;}
 function imageNode(url){const image=new Image();image.alt='';image.loading='eager';try{const u=new URL(url);if(u.protocol==='https:'&&u.hostname==='cdn.shopify.com')image.src=u.href;}catch{}return image;}
 function render(q){
  quote=q;lang=resolveLocale(q.locale,params.get('lang'),navigator.languages);translate();$('items').replaceChildren();
@@ -28,7 +29,7 @@ function render(q){
  }
  for(const key of ['summary-total','pay-total','mobile-total'])$(key).textContent=money(q.total,q.currency);
  $('currency').textContent=q.currency;$('subtotal').textContent=money(q.subtotal,q.currency);$('discount-row').hidden=!q.discount;$('discount-label').textContent=t.discount+(q.promotionCode?' · '+q.promotionCode:'');$('discount').textContent='−'+money(q.discount||0,q.currency);$('shipping-price').textContent=money(q.shipping,q.currency);$('shipping-total').textContent=money(q.shipping,q.currency);$('tax-row').hidden=!q.tax;$('tax').textContent=money(q.tax||0,q.currency);
- $('charge-note').textContent=q.currency===q.chargeCurrency?'':t.charged+' '+money(q.chargeMinor,q.chargeCurrency)+' '+q.chargeCurrency+'.';$('summary-note').textContent='';
+ $('charge-note').textContent=chargePresentation(q,lang,t.pay).notice;$('summary-note').textContent='';
  const regionNames=new Intl.DisplayNames([lang],{type:'region'});
  for(const key of ['country','bcountry']){const selected=$(key).value||q.country;$(key).replaceChildren();for(const code of [...new Set([q.country,'CA','US','GB','AU','FR','DE','ES','IT','PT'])]){const op=document.createElement('option');op.value=code;op.textContent=regionNames.of(code);$(key).append(op);}$(key).value=key==='country'?q.country:selected;}
  $('country').disabled=true;$('contact-fields').disabled=q.paymentsEnabled!==true;$('same').disabled=q.paymentsEnabled!==true;
