@@ -1199,7 +1199,19 @@ const JS = String.raw`(function(){
           }).catch(function(){}).finally(function(){clearTimeout(deadline);});
         }
       }catch(_){}
-      return prepareSuggestions.then(function(){return nativeFetch(input,nextInit);}).then(function(response){
+      return prepareSuggestions.then(async function(){
+        var payload=JSON.parse(nextInit.body);
+        try {
+          var root=(window.Shopify&&window.Shopify.routes&&window.Shopify.routes.root)||'/';
+          var response=await nativeFetch(root+'cart.js',{cache:'no-store',headers:{Accept:'application/json'},signal:AbortSignal.timeout(8000)});
+          if(!response.ok)throw new Error('cart');
+          var cart=await response.json();
+          payload.pmp_cart={token:typeof cart.token==='string'?cart.token.split('?')[0]:null,currency:cart.currency,total_price:cart.total_price,items_subtotal_price:cart.items_subtotal_price,item_count:cart.item_count,cart_level_discount_applications:(cart.cart_level_discount_applications||[]).map(function(d){return {total_allocated_amount:d.total_allocated_amount};}),items:(cart.items||[]).map(function(i){return {variant_id:i.variant_id||i.id,quantity:i.quantity,final_line_price:i.final_line_price,original_line_price:i.original_line_price,product_title:i.product_title||i.title,image:typeof i.image==='string'?i.image:null,selling_plan_allocation:!!i.selling_plan_allocation};})};
+          payload.storefront_root=root;payload.locale=(window.Shopify&&window.Shopify.locale)||document.documentElement.lang||'en';
+        }catch(_){delete payload.pmp_cart;}
+        nextInit.body=JSON.stringify(payload);
+        return nativeFetch(input,nextInit);
+      }).then(function(response){
         if (!response.ok) {
           checkoutError('create_checkout', 'http_' + String(response.status || 0));
           return response;
@@ -1212,7 +1224,7 @@ const JS = String.raw`(function(){
         }).then(function(data){
           if (data && data.provider === 'square' && data.sessionId && data.checkoutUrl) {
             var squareUrl = new URL(data.checkoutUrl);
-            if (!['https://pmp-stripe-bridge.vercel.app','https://checkout.puremajestypet.com'].includes(squareUrl.origin) || squareUrl.pathname !== '/square-checkout.html') throw new Error('Invalid checkout URL');
+            if (!['https://pmp-stripe-bridge.vercel.app','https://checkout.puremajestypet.com'].includes(squareUrl.origin) || !['/square-checkout.html','/godaddy-checkout.html'].includes(squareUrl.pathname)) throw new Error('Invalid checkout URL');
             beginCheckout(data);
             window.location.assign(squareUrl.href);
             // Stop legacy Stripe mounting while this document navigates away.

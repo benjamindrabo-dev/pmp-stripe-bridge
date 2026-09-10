@@ -1,0 +1,84 @@
+{
+  "testedAt": "2026-09-10T16:16:46.680Z",
+  "scope": "Production page and actual GoDaddy SDK with synthetic quote responses",
+  "quoteMocked": true,
+  "sdkMocked": false,
+  "cardFrameContentsRead": false,
+  "cardDataEntered": false,
+  "paymentsSubmitted": 0,
+  "cases": [
+    {
+      "locale": "en",
+      "width": 1440,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "$107.97",
+      "chargeNotice": "Will be charged in CAD"
+    },
+    {
+      "locale": "fr",
+      "width": 390,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "107,97 $US",
+      "chargeNotice": "Le paiement sera débité en CAD"
+    },
+    {
+      "locale": "de",
+      "width": 768,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "107,97 $",
+      "chargeNotice": "Die Zahlung wird in CAD abgebucht"
+    },
+    {
+      "locale": "es",
+      "width": 390,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "107,97 US$",
+      "chargeNotice": "El pago se cobrará en CAD"
+    },
+    {
+      "locale": "it",
+      "width": 1440,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "107,97 USD",
+      "chargeNotice": "Il pagamento sarà addebitato in CAD"
+    },
+    {
+      "locale": "pt",
+      "width": 390,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "US$ 107,97",
+      "chargeNotice": "O pagamento será debitado em CAD"
+    },
+    {
+      "locale": "ja",
+      "width": 390,
+      "passed": true,
+      "csp": [],
+      "sdkReady": true,
+      "paymentFrameVisible": true,
+      "displayTotal": "$107.97",
+      "chargeNotice": "Will be charged in CAD"
+    }
+  ],
+  "passed": true,
+  "successfulCases": 7,
+  "finishedAt": "2026-09-10T16:16:54.385Z"
+}
