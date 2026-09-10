@@ -1,0 +1,72 @@
+{
+  "recordedAt": "2026-09-10",
+  "scope": "Real anonymous Shopify Ajax carts to GoDaddy checkout quote, before payment",
+  "evidence": {
+    "deploymentId": "dpl_4y9uvzRnDKdbcdpqFTfL3HEeMAL9",
+    "commit": "10a53e49fd672eac6e857716e2f0542c43d08a37",
+    "logMarker": "GODADDY_REAL_CART_QA",
+    "startedAt": "2026-09-10T13:29:07.203Z",
+    "finishedAt": "2026-09-10T13:29:27.452Z",
+    "source": "Vercel Preview build logs retrieved through connected Vercel tool"
+  },
+  "method": {
+    "storefrontCart": "Real localized Shopify Ajax cart/add.js and cart.js, isolated anonymous cookie jars",
+    "serverValidation": "Independent Shopify cart recalculation and actual Admin API product lookups",
+    "providerAccess": "Actual GoDaddy authentication and read-only store verification",
+    "quoteStorage": "Real Preview-namespaced Redis records",
+    "handlerInvocation": "Actual API handlers invoked inside the Vercel Preview process, not through the public HTTP endpoint",
+    "browserClickThrough": false,
+    "monetaryApiRequests": 0,
+    "shopifyOrdersCreated": 0,
+    "liveStorefrontButtonsChanged": false
+  },
+  "passed": 8,
+  "failed": 0,
+  "cases": [
+    {"name":"1 collagen, Canada","currency":"CAD","cartSubtotalMinor":4500,"checkoutSubtotalMinor":4500,"shippingMinor":0,"extraDiscountMinor":0,"totalMinor":4500,"chargeCurrency":"CAD","chargeMinor":4500,"quantity":1,"productLines":1,"imageUrlsPresent":1,"differenceMinor":0,"passed":true},
+    {"name":"2 collagen + 1 yeast, Canada, French UI locale","currency":"CAD","cartSubtotalMinor":13500,"checkoutSubtotalMinor":13500,"shippingMinor":0,"extraDiscountMinor":0,"totalMinor":13500,"chargeCurrency":"CAD","chargeMinor":13500,"quantity":3,"productLines":2,"imageUrlsPresent":2,"differenceMinor":0,"passed":true},
+    {"name":"Collagen + yeast + probiotic + eye drops, US","currency":"USD","cartSubtotalMinor":10797,"checkoutSubtotalMinor":10797,"shippingMinor":0,"extraDiscountMinor":0,"totalMinor":10797,"chargeCurrency":"CAD","chargeMinor":14894,"quantity":4,"productLines":4,"imageUrlsPresent":4,"differenceMinor":0,"passed":true},
+    {"name":"2 dental powder + 1 ear cleaner, France","currency":"EUR","cartSubtotalMinor":8790,"checkoutSubtotalMinor":8790,"shippingMinor":0,"extraDiscountMinor":0,"totalMinor":8790,"chargeCurrency":"CAD","chargeMinor":14107,"quantity":3,"productLines":2,"imageUrlsPresent":2,"differenceMinor":0,"passed":true},
+    {"name":"Dental upsell added to real Canadian quote","currency":"CAD","beforeMinor":4500,"addedMinor":6800,"afterMinor":11300,"passed":true},
+    {"name":"Dental upsell removed; stale quote edit rejected","currency":"CAD","restoredTotalMinor":4500,"passed":true},
+    {"name":"WELCOME20 on real Canadian quote","currency":"CAD","beforeMinor":4500,"discountMinor":900,"afterMinor":3600,"passed":true},
+    {"name":"Preview payment preparation stays blocked","httpStatus":503,"paymentsSubmitted":0,"passed":true}
+  ],
+  "issuesFoundAndAddressed": [
+    "Used locale-aware storefront cart routes so currency matches the selected market",
+    "Removed product description HTML and unrelated data from cart handoff payloads",
+    "Used Shopify-calculated mixed-product discounts instead of assuming every gift matches the paid variant",
+    "Inventory tracking status is considered for the dental upsell",
+    "Parsed and validated Shopify Ajax JSON even when its content-type is JavaScript"
+  ],
+  "subsequentUiChanges": {
+    "deploymentId": "dpl_GWJEVpdwABRPKXWs8nKG5uP7b2XV",
+    "commit": "06f6181b138afa5d235da53802948bd96c64a2fb",
+    "deploymentStateVerified": "READY",
+    "sloganRemovedFromHtml": true,
+    "customerLocalePriority": true,
+    "uiLanguages": ["en","fr","de","es","it","pt"],
+    "unsupportedLanguageFallback": "en",
+    "realQuoteApiConnectedInFrontend": true,
+    "dentalAddRemoveConnectedInFrontend": true,
+    "noSessionFakeCartRemoved": true,
+    "shopifyHandoffScriptWritten": true,
+    "shopifyHandoffScriptInstalledOnLiveTheme": false,
+    "newBrowserRegressionSuiteExecuted": false,
+    "newBrowserTestUpload": "Blocked by tool; not retried through another upload route"
+  },
+  "limits": [
+    "These eight cases do not validate every bundle, discount code, market, currency or cart extension",
+    "The original live Shopify checkout button has not been redirected to GoDaddy",
+    "The full browser-to-payment-to-Shopify-order flow has not been completed",
+    "The current visual revision has not passed a new browser regression run",
+    "All tested carts had zero shipping; final address-dependent shipping and tax were not verified",
+    "GoDaddy settlement currency in these tests is CAD; USD/EUR display prices are not USD/EUR card debits",
+    "GoDaddy card iframe language support is separate from translated merchant-page labels",
+    "Apple Pay and Google Pay merchant/domain readiness and transactions remain unverified; buttons stay hidden",
+    "No verified Klarna or Afterpay integration was added",
+    "The temporary build command for live-cart QA has been removed"
+  ],
+  "readyForProductionMigration": false,
+  "productionPaymentsChanged": false
+}
