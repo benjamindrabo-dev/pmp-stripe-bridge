@@ -1,0 +1,38 @@
+name: Fix Shopify discount handoff
+on:
+  push:
+    branches: [main]
+    paths:
+      - scripts/fix-godaddy-discount-handoff.py
+      - .github/workflows/fix-godaddy-discount-handoff.yml
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply checked source replacements
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
+          python3 scripts/fix-godaddy-discount-handoff.py
+      - name: Verify source and discounted cart regressions without network
+        run: |
+          node --check api/meta-offer-summary.js
+          node --check api/godaddy-entry.js
+          node --check lib/godaddy-storefront-cart.js
+          node --test test/godaddy-discount-handoff.test.js test/godaddy-payments.test.js test/godaddy-charge-presentation.test.js
+          git diff --check
+      - name: Publish only the reviewed checkout helper
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add api/meta-offer-summary.js
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Preserve applied Shopify discounts in live checkout handoff; isolate tracking from redirect'
+          git push origin HEAD:main
