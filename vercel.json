@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "node scripts/godaddy-production-readiness.mjs --run",
   "rewrites": [
     {
       "source": "/.well-known/oauth-protected-resource",
