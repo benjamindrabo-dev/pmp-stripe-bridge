@@ -35,7 +35,7 @@ async function anonymousCart(context,country,items){
 }
 try{
  const asset=await fetch(HOST+'/godaddy-checkout.js',{signal:AbortSignal.timeout(10000)});
- assert.ok(asset.ok()&&(await asset.text()).includes("action:'change-country'"),'COUNTRY_UI_NOT_DEPLOYED');
+ assert.ok(asset.ok&&(await asset.text()).includes("action:'change-country'"),'COUNTRY_UI_NOT_DEPLOYED');
  browser=await chromium.launch({headless:true});
  for(const scenario of [
   {name:'exact-test-product',items:[{id:TEST,quantity:1}],countries:['CA','FR','US'],width:1440},
