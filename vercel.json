@@ -1,61 +1,27 @@
 {
-  "$schema": "https://openapi.vercel.sh/vercel.json",
-  "buildCommand": "node scripts/godaddy-production-readiness.mjs --run",
-  "rewrites": [
-    {
-      "source": "/.well-known/oauth-protected-resource",
-      "destination": "/api/oauth?route=protected-resource"
-    },
-    {
-      "source": "/.well-known/oauth-authorization-server",
-      "destination": "/api/oauth?route=authorization-server"
-    },
-    {
-      "source": "/oauth/authorize",
-      "destination": "/api/oauth?route=authorize"
-    },
-    {
-      "source": "/oauth/token",
-      "destination": "/api/oauth?route=token"
-    },
-    {
-      "source": "/api/mcp-health",
-      "destination": "/api/oauth?route=health"
-    }
-  ],
-  "functions": {
-    "api/mcp.js": {
-      "maxDuration": 60
-    },
-    "api/ads-backfill.js": {
-      "maxDuration": 60
-    },
-    "api/square-pay.js": {
-      "maxDuration": 60
-    },
-    "api/square-checkout.js": {
-      "maxDuration": 60
-    },
-    "api/square-webhook.js": {
-      "maxDuration": 60
-    },
-    "api/create-checkout.js": {
-      "maxDuration": 60
-    },
-    "api/session-status.js": {
-      "maxDuration": 60
-    },
-    "api/stripe-checkout.js": {
-      "maxDuration": 60
-    },
-    "api/stripe-webhook.js": {
-      "maxDuration": 60
-    }
-  },
-  "crons": [
-    {
-      "path": "/api/ads-backfill",
-      "schedule": "0 */3 * * *"
-    }
-  ]
+ "$schema":"https://openapi.vercel.sh/vercel.json",
+ "env":{
+  "GODADDY_BUSINESS_ID":"3cfdebe4-e85d-41e9-9b26-96002a0c8654",
+  "GODADDY_APPLICATION_ID":"urn:aid:8982d4de-1db8-40dc-b7a2-211222a2325f",
+  "GODADDY_STORE_ID":"40c35dbb-13c6-466f-b3f7-d832c4fb58c0",
+  "GODADDY_CHARGE_CURRENCY":"CAD",
+  "PMP_GODADDY_ENABLED":"0",
+  "PMP_GODADDY_REVIEW_APPROVED":"0",
+  "PMP_GODADDY_ACCEPTANCE_VERIFIED":"0"
+ },
+ "rewrites":[
+  {"source":"/.well-known/oauth-protected-resource","destination":"/api/oauth?route=protected-resource"},
+  {"source":"/.well-known/oauth-authorization-server","destination":"/api/oauth?route=authorization-server"},
+  {"source":"/oauth/authorize","destination":"/api/oauth?route=authorize"},
+  {"source":"/oauth/token","destination":"/api/oauth?route=token"},
+  {"source":"/api/mcp-health","destination":"/api/oauth?route=health"}
+ ],
+ "functions":{
+  "api/mcp.js":{"maxDuration":60},"api/ads-backfill.js":{"maxDuration":60},
+  "api/square-pay.js":{"maxDuration":60},"api/square-checkout.js":{"maxDuration":60},
+  "api/square-webhook.js":{"maxDuration":60},"api/create-checkout.js":{"maxDuration":60},
+  "api/session-status.js":{"maxDuration":60},"api/stripe-checkout.js":{"maxDuration":60},
+  "api/stripe-webhook.js":{"maxDuration":60}
+ },
+ "crons":[{"path":"/api/ads-backfill","schedule":"0 */3 * * *"}]
 }
