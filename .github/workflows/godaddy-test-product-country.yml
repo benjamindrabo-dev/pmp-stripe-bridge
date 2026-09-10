@@ -1,0 +1,39 @@
+name: Verify GoDaddy test product and country selector
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/godaddy-test-product-country.yml
+      - scripts/godaddy-test-product-country-smoke.mjs
+permissions:
+  contents: read
+concurrency:
+  group: godaddy-test-product-country
+  cancel-in-progress: true
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify source and non-payment regression tests
+        run: |
+          node --check public/godaddy-checkout.js
+          node --check lib/godaddy-cart.js
+          node --check lib/godaddy-storefront-cart.js
+          node --test test/godaddy-test-product-country.test.js test/godaddy-payments.test.js test/godaddy-charge-presentation.test.js
+      - name: Install isolated browser
+        run: npm install --no-save --package-lock=false --ignore-scripts playwright && npx playwright install --with-deps chromium
+      - name: Real test variant and country selection without card data or payments
+        run: node scripts/godaddy-test-product-country-smoke.mjs
+      - name: Save measured report and public checkout screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: godaddy-test-product-country
+          path: artifacts/godaddy-test-country
+          if-no-files-found: ignore
+          retention-days: 3
