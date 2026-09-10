@@ -66,6 +66,13 @@ try{
     await page.locator('.remove-addon').click();await page.waitForFunction(()=>document.querySelectorAll('.remove-addon').length===0,null,{timeout:60000});
     assert.equal(await page.locator('#summary-total').textContent(),result.totalVisible);result.dentalRemovedTotalRestored=true;
    }
+   // SDK readiness precedes its first paint. Cart edits also finish loading
+   // suggestions after the amount updates. Wait for both before evidence capture.
+   await page.waitForFunction(()=>document.querySelector('#pay')?.disabled===false,null,{timeout:30000});
+   await page.waitForTimeout(3000);
+   result.finalPayEnabled=await page.locator('#pay').isEnabled();assert.equal(result.finalPayEnabled,true);
+   result.finalPayButton=await page.locator('#pay-label').textContent();
+   result.hostedFramePaintWaitMs=3000;
    result.passed=true;result.stage='complete';fs.mkdirSync('artifacts/godaddy-launch',{recursive:true});await page.screenshot({path:'artifacts/godaddy-launch/'+scenario.name+'.png',fullPage:true});
   }catch(error){result.error=/^[A-Z_]+$/.test(error.message||'')?error.message:((error.name||'')==='TimeoutError'?'BROWSER_TIMEOUT':'ASSERTION_FAILED');try{const u=new URL(page.url());result.stoppedAt=u.origin+u.pathname;result.statusText=(await page.locator('#status').textContent({timeout:1000})||'').slice(0,180);result.bridge=bridgeResponse;}catch{}}
   finally{try{await context.request.post(SITE+scenario.root+'/cart/clear.js',{data:{}});}catch{}await context.close();}
