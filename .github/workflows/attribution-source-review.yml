@@ -16,7 +16,7 @@ jobs:
       - name: Export tracked source only, never environment or Git credentials
         run: |
           mkdir source-review
-          git archive HEAD api lib public test scripts package.json package-lock.json vercel.json | tar -x -C source-review
+          git archive HEAD api lib public test scripts package.json vercel.json | tar -x -C source-review
       - uses: actions/upload-artifact@v4
         with:
           name: attribution-source-review
