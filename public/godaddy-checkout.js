@@ -5,6 +5,7 @@ const {dictionary,resolveLocale}=await import('/godaddy-checkout-i18n.js');
 const {chargePresentation}=await import('/godaddy-charge-presentation.js');
 const $=id=>document.getElementById(id),params=new URLSearchParams(location.search);
 let id=params.get('session_id')||'',quote=null,collect=null,ready=false,busy=false,countryChanging=false,prepared=null,settled=false;
+let express=null,expressInitializing=false,expressActive=false,expressPending=false;
 let lang=resolveLocale(params.get('lang'),navigator.languages),t=dictionary(lang);
 const valid=value=>/^gd_[a-f0-9]{32}$/.test(value||'');
 // Keep the original neutral checkout layout.
@@ -18,11 +19,16 @@ translate();
 const money=(n,currency)=>new Intl.NumberFormat(lang,{style:'currency',currency}).format(n/100);
 function message(text,success=false){$('status').textContent=text;$('status').className=success?'status succeeded':'status';}
 function controls(){
- const disabled=busy||countryChanging||settled||!quote;
+ const disabled=busy||countryChanging||settled||!quote||expressActive||expressPending;
  $('pay').disabled=disabled||!ready||quote?.paymentsEnabled!==true||$('country').value!==quote?.country;
  $('pay-label').textContent=settled?t.received:busy||countryChanging?t.processing:quote?(quote.paymentsEnabled?chargePresentation(quote,lang,t.pay).payButton:t.preview):t.loading;
  $('country').disabled=disabled||quote?.paymentsEnabled!==true||quote?.canChangeCountry!==true;
  for(const node of document.querySelectorAll('#apply-promo,#dental-upsell button,.remove-addon'))node.disabled=disabled;
+ if(express)express.setBlocked(disabled);
+ $('contact-fields').inert=expressActive||expressPending;
+ $('billing').inert=expressActive||expressPending;
+ $('card-element').inert=expressActive||expressPending||quote?.paymentsEnabled!==true;
+ $('same').disabled=expressActive||expressPending||quote?.paymentsEnabled!==true;
 }
 function imageNode(url){const image=new Image();image.alt='';image.loading='eager';try{const u=new URL(url);if(u.protocol==='https:'&&u.hostname==='cdn.shopify.com')image.src=u.href;}catch{}return image;}
 function render(q){
@@ -49,9 +55,9 @@ async function api(body,view,payment=false){
 }
 function acceptSession(q){id=q.sessionId;const url=new URL(location.href);url.searchParams.set('session_id',id);url.searchParams.delete('receive_cart');url.searchParams.delete('handoff');history.replaceState(null,'',url.pathname+url.search);render(q);}
 async function loadOptions(){const expected=id;upsell.hidden=true;try{const {suggestions}=await api(null,'options');if(id!==expected||!suggestions?.length)return;const offer=suggestions[0];upsell.replaceChildren();const heading=document.createElement('h2');heading.textContent=t.upsell;const row=document.createElement('div');row.className='product';row.append(imageNode(offer.image));const detail=document.createElement('div');detail.className='product-detail';const name=document.createElement('div');name.className='product-title';name.textContent=t.dental;const price=document.createElement('div');price.textContent=money(offer.unitMinor,offer.currency);detail.append(name,price);const add=document.createElement('button');add.type='button';add.className='button';add.dataset.action='add-dental';add.textContent=t.add;add.onclick=()=>edit('add-dental');row.append(detail,add);upsell.append(heading,row);upsell.hidden=false;controls();}catch{upsell.hidden=true;}}
-async function edit(action){if(busy||countryChanging||settled)return;busy=true;controls();message('');try{const next=await api({action});acceptSession(next);await loadOptions();}catch{message(t.failed);}finally{busy=false;controls();}}
+async function edit(action){if(busy||countryChanging||settled||expressActive||expressPending)return;busy=true;controls();message('');try{const next=await api({action});acceptSession(next);await loadOptions();}catch{message(t.failed);}finally{busy=false;controls();}}
 $('country').addEventListener('change',async()=>{
- if(!quote||busy||countryChanging||settled)return;
+ if(!quote||busy||countryChanging||settled||expressActive||expressPending)return;
  const previous=quote.country,country=$('country').value;if(country===previous)return;
  countryChanging=true;prepared=null;controls();message(t.processing);
  try{
@@ -66,16 +72,39 @@ $('country').addEventListener('change',async()=>{
   message(notices[lang]||notices.en);
  }finally{countryChanging=false;controls();}
 });
-$('apply-promo').addEventListener('click',async()=>{if(busy||countryChanging||!quote)return;busy=true;controls();try{const next=await api({action:'promotion',code:$('promo').value,email:$('email').value});acceptSession(next);$('promo-status').textContent=t.codeApplied;await loadOptions();}catch{$('promo-status').textContent=t.codeFailed;}finally{busy=false;controls();}});
+$('apply-promo').addEventListener('click',async()=>{if(busy||countryChanging||!quote||expressActive||expressPending)return;busy=true;controls();try{const next=await api({action:'promotion',code:$('promo').value,email:$('email').value});acceptSession(next);$('promo-status').textContent=t.codeApplied;await loadOptions();}catch{$('promo-status').textContent=t.codeFailed;}finally{busy=false;controls();}});
 function details(){const shipping={first_name:$('first').value,last_name:$('last').value,address_line_1:$('address').value,address_line_2:$('address2').value,locality:$('city').value,administrative_district_level_1:$('region').value,postal_code:$('zip').value,country:quote.country};return {email:$('email').value,shipping,billing:$('same').checked?shipping:{...shipping,country:$('bcountry').value,address_line_1:$('baddress').value,address_line_2:'',locality:$('bcity').value,administrative_district_level_1:$('bregion').value,postal_code:$('bzip').value},confirmedChargeMinor:quote.chargeMinor};}
-function complete(result){if(!result.paid)return false;settled=true;busy=false;controls();message(t.received,true);return true;}
+function complete(result){if(!result.paid)return false;settled=true;busy=false;expressActive=false;expressPending=false;controls();message(t.received,true);return true;}
 async function poll(){for(let n=0;n<8;n++){await new Promise(r=>setTimeout(r,2500));try{if(complete(await api(null,'status',true)))return;}catch{}}ready=false;busy=false;controls();message(t.checking);}
+function initExpress(){
+ if(expressInitializing||express||!quote?.paymentsEnabled)return;
+ expressInitializing=true;
+ import('/godaddy-express.js').then(({setupExpress})=>setupExpress({
+  box:walletBox,getQuote:()=>quote,getLabels:()=>t,
+  canStart:()=>quote?.paymentsEnabled===true&&!busy&&!countryChanging&&!settled&&!expressActive&&!expressPending,
+  setActive:value=>{expressActive=value;controls();},
+  acceptQuote:q=>{acceptSession(q);if($('same').checked)$('bcountry').value=q.country;},
+  api,
+  onContact:person=>{
+   $('email').value=person.email;
+   const shipping={first:'first_name',last:'last_name',address:'address_line_1',address2:'address_line_2',city:'locality',region:'administrative_district_level_1',zip:'postal_code',country:'country'};
+   for(const [field,key] of Object.entries(shipping))$(field).value=person.shipping[key]||'';
+   const billing={bcountry:'country',baddress:'address_line_1',bcity:'locality',bregion:'administrative_district_level_1',bzip:'postal_code'};
+   for(const [field,key] of Object.entries(billing))$(field).value=person.billing[key]||'';
+   $('same').checked=JSON.stringify(person.shipping)===JSON.stringify(person.billing);
+   $('billing').hidden=$('same').checked;
+  },
+  onPaid:result=>complete(result),
+  onPending:async()=>{expressActive=false;expressPending=true;ready=false;controls();message(t.checking);await poll();},
+  onError:()=>message(t.failed)
+ })).then(controller=>{express=controller;controls();}).catch(()=>{walletBox.hidden=true;walletBox.dataset.state='unavailable';});
+}
 function mount(){
  if(collect)return;const script=document.createElement('script');script.src='https://collect.commerce.godaddy.com/sdk.js';script.async=true;script.onerror=()=>{$('card-state').textContent=t.failed;};
- script.onload=()=>{try{collect=new window.TokenizeJs(quote.businessId,quote.applicationId);collect.on('ready',()=>{ready=true;$('card-element').dataset.sdkReady='true';$('card-state').textContent='';controls();});collect.on('error',()=>{if(!quote.paymentsEnabled)return;prepared=null;busy=false;message(t.failed);controls();});collect.on('nonce',async event=>{if(!quote.paymentsEnabled||!busy||countryChanging||!prepared)return;const attempt=prepared;prepared=null;const nonce=event?.data?.nonce;if(typeof nonce!=='string'){busy=false;controls();return;}try{const result=await api({action:'pay',nonce,preparedId:attempt.preparedId},null,true);if(!complete(result))await poll();}catch{await poll();}});$('card-element').replaceChildren();collect.mount('card-element',document,{displayComponents:{firstName:false,lastName:false,emailAddress:false,labels:true},iFrame:{width:'100%',height:'250px',border:'0',borderRadius:'6px'},style:{theme:'default'},locale:lang==='fr'?'fr-CA':'en-CA',inlineErrors:true});}catch{ready=false;$('card-state').textContent=t.failed;controls();}};document.head.append(script);
+ script.onload=()=>{try{collect=new window.TokenizeJs(quote.businessId,quote.applicationId);collect.on('ready',()=>{ready=true;$('card-element').dataset.sdkReady='true';$('card-state').textContent='';controls();initExpress();});collect.on('error',()=>{if(!quote.paymentsEnabled||expressActive||expressPending)return;prepared=null;busy=false;message(t.failed);controls();});collect.on('nonce',async event=>{if(!quote.paymentsEnabled||!busy||countryChanging||!prepared||expressActive||expressPending)return;const attempt=prepared;prepared=null;const nonce=event?.data?.nonce;if(typeof nonce!=='string'){busy=false;controls();return;}try{const result=await api({action:'pay',nonce,preparedId:attempt.preparedId},null,true);if(!complete(result))await poll();}catch{await poll();}});$('card-element').replaceChildren();collect.mount('card-element',document,{displayComponents:{firstName:false,lastName:false,emailAddress:false,labels:true},iFrame:{width:'100%',height:'250px',border:'0',borderRadius:'6px'},style:{theme:'default'},locale:lang==='fr'?'fr-CA':'en-CA',inlineErrors:true});}catch{ready=false;$('card-state').textContent=t.failed;controls();}};document.head.append(script);
 }
 $('same').addEventListener('change',()=>{$('billing').hidden=$('same').checked;for(const key of ['baddress','bcity'])$(key).required=!$('same').checked;});
-$('checkout-form').addEventListener('submit',async event=>{event.preventDefault();if(!quote?.paymentsEnabled||busy||countryChanging||!ready||settled||$('country').value!==quote.country)return;if(!$('checkout-form').reportValidity())return;busy=true;controls();message('');try{const d=details();prepared=await api({action:'prepare',...d},null,true);if(complete(prepared))return;if(prepared.pending){prepared=null;await poll();return;}collect.getNonce({firstName:d.shipping.first_name,lastName:d.shipping.last_name,emailAddress:d.email,line1:d.billing.address_line_1,line2:d.billing.address_line_2,city:d.billing.locality,territory:d.billing.administrative_district_level_1,countryCode:d.billing.country,zipCode:d.billing.postal_code,shippingLine1:d.shipping.address_line_1,shippingLine2:d.shipping.address_line_2,shippingCity:d.shipping.locality,shippingTerritory:d.shipping.administrative_district_level_1,shippingZip:d.shipping.postal_code});}catch{prepared=null;busy=false;message(t.failed);controls();}});
+$('checkout-form').addEventListener('submit',async event=>{event.preventDefault();if(!quote?.paymentsEnabled||busy||countryChanging||!ready||settled||expressActive||expressPending||$('country').value!==quote.country)return;if(!$('checkout-form').reportValidity())return;busy=true;controls();message('');try{const d=details();prepared=await api({action:'prepare',...d},null,true);if(complete(prepared))return;if(prepared.pending){prepared=null;await poll();return;}collect.getNonce({firstName:d.shipping.first_name,lastName:d.shipping.last_name,emailAddress:d.email,line1:d.billing.address_line_1,line2:d.billing.address_line_2,city:d.billing.locality,territory:d.billing.administrative_district_level_1,countryCode:d.billing.country,zipCode:d.billing.postal_code,shippingLine1:d.shipping.address_line_1,shippingLine2:d.shipping.address_line_2,shippingCity:d.shipping.locality,shippingTerritory:d.shipping.administrative_district_level_1,shippingZip:d.shipping.postal_code});}catch{prepared=null;busy=false;message(t.failed);controls();}});
 async function load(){for(let i=0;i<5;i++){const q=await api();if(q.supersededBy&&valid(q.supersededBy)){id=q.supersededBy;continue;}acceptSession(q);if(q.completed){complete(await api(null,'status',true));return;}mount();await loadOptions();return;}throw Error('CHECKOUT_UPDATED');}
 async function receiveCart(){
  const nonce=params.get('handoff');if(!window.opener||!nonce||!/^[a-f0-9]{32}$/.test(nonce))throw Error('INVALID_HANDOFF');message(t.waiting);
