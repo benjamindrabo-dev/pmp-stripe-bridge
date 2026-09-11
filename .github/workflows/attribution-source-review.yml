@@ -1,24 +1,30 @@
-name: Attribution source review
+name: GoDaddy attribution regression
 on:
   push:
-    branches: [fix/godaddy-attribution-20260910]
-    paths: [.github/workflows/attribution-source-review.yml]
+    branches: [main, fix/godaddy-attribution-20260910]
+    paths:
+      - lib/godaddy-attribution.js
+      - lib/godaddy-cart.js
+      - lib/godaddy-embedded.js
+      - api/meta-offer-summary.js
+      - api/stripe-webhook.js
+      - test/godaddy-attribution.test.js
+      - .github/workflows/attribution-source-review.yml
 permissions:
   contents: read
 jobs:
-  snapshot:
+  attribution:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Export tracked source only, never environment or Git credentials
-        run: |
-          mkdir source-review
-          git archive HEAD api lib public test scripts package.json vercel.json | tar -x -C source-review
-      - uses: actions/upload-artifact@v4
+      - uses: actions/setup-node@v4
         with:
-          name: attribution-source-review
-          path: source-review
-          retention-days: 1
+          node-version: '24'
+      - name: Syntax and offline regressions; no live credentials or payment requests
+        run: |
+          node --check lib/godaddy-attribution.js
+          node --check lib/godaddy-cart.js
+          node --test test/godaddy-*.test.js test/order-attribution-notes.test.js test/meta-offer-summary-tracking.test.js test/create-checkout-correlation.test.js test/stripe-cad*.test.js test/square-bridge.test.js
