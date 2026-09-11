@@ -1,0 +1,50 @@
+name: Publish GoDaddy express checkout
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/enable-godaddy-express.yml
+      - scripts/enable-godaddy-express.py
+permissions:
+  contents: write
+concurrency:
+  group: godaddy-express-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Apply exact reviewed checkout integration
+        run: python3 scripts/enable-godaddy-express.py
+      - name: Validate syntax and synthetic payment handoff regressions
+        run: |
+          node --check public/godaddy-checkout.js
+          node --check public/godaddy-express.js
+          node --check public/godaddy-express-contract.js
+          node --test test/godaddy-express.test.js test/godaddy-payments.test.js test/godaddy-charge-presentation.test.js
+          git diff --check
+      - name: Publish only checkout glue and remove one-time enrollment command
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add public/godaddy-checkout.js public/godaddy-checkout.html vercel.json
+          git commit -m 'Enable Apple Pay and Google Pay above email with exact CAD wallet totals and isolated card flow'
+          git pull --rebase origin main
+          git push origin HEAD:main
+      - name: Install isolated UI test dependency
+        run: npm install --no-save --package-lock=false --ignore-scripts playwright && npx playwright install --with-deps chromium
+      - name: Check actual public checkout, official SDK and button placement without payment
+        run: node scripts/godaddy-express-browser-smoke.mjs
+      - name: Save measured result and checkout screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: godaddy-express-verification
+          path: artifacts/godaddy-express
+          if-no-files-found: ignore
+          retention-days: 3
