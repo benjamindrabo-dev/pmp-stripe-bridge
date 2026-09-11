@@ -1,6 +1,7 @@
 // Explicit operator audit: read-only Shopify orders and exact associated Redis carts.
 // Never charges, creates/updates orders, sends analytics, changes consent, or logs
 // customer information, cart/session identifiers, URLs, tokens or secret values.
+import {readFileSync} from 'node:fs';
 import {shopify,get} from '../lib/square-bridge.js';
 import {orderAttributionAttributes} from '../api/stripe-webhook.js';
 
@@ -8,13 +9,17 @@ if(process.argv[2]!=='--read-only'||process.env.VERCEL_ENV!=='production'||proce
  console.log('GODADDY_ATTRIBUTION_READ_AUDIT skipped');
 }else{
  const report={at:new Date().toISOString(),limit:20,ordersRead:0,storedCartsRead:0,missingCarts:0,withOriginalTouches:0,withAcquisitionSignal:0,withoutAcquisitionSignal:0,additionalRecoverableOrderSources:0,moreOrdersExist:false,orderWrites:0,storageWrites:0,financialRequests:0,advertisingRequests:0};
+ let stage='configuration';
  try{
-  const business=String(process.env.GODADDY_BUSINESS_ID||'');
+  const file=JSON.parse(readFileSync(new URL('../vercel.json',import.meta.url),'utf8'));
+  const business=String(process.env.GODADDY_BUSINESS_ID||file.env?.GODADDY_BUSINESS_ID||'');
   if(!/^[a-f0-9-]{36}$/i.test(business))throw Error('CONFIGURATION_MISSING');
+  stage='read-orders';
   const query='query GoDaddyStoredAttributionAudit($q:String!){orders(first:20,sortKey:CREATED_AT,reverse:true,query:$q){nodes{sourceIdentifier customAttributes{key value}} pageInfo{hasNextPage endCursor}}}';
   const data=await shopify(query,{q:"tag:godaddy created_at:>='2026-09-10T16:45:00Z'"});
   if(!Array.isArray(data.orders?.nodes))throw Error('ORDER_READ_FAILED');
   report.moreOrdersExist=data.orders.pageInfo?.hasNextPage===true;
+  stage='read-carts';
   for(const order of data.orders.nodes){
    const id=order.sourceIdentifier;if(!/^gd_[a-f0-9]{32}$/.test(id||''))continue;
    report.ordersRead++;
@@ -31,6 +36,6 @@ if(process.argv[2]!=='--read-only'||process.env.VERCEL_ENV!=='production'||proce
    if(signal&&(!stored||stored==='Direct / unknown'))report.additionalRecoverableOrderSources++;
   }
   report.result='read-complete';
- }catch{report.result='read-incomplete';}
+ }catch{report.result='read-incomplete';report.stoppedAt=stage;}
  console.log('GODADDY_ATTRIBUTION_READ_AUDIT '+JSON.stringify(report));
 }
