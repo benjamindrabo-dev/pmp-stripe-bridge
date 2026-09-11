@@ -1,0 +1,24 @@
+name: Attribution source review
+on:
+  push:
+    branches: [fix/godaddy-attribution-20260910]
+    paths: [.github/workflows/attribution-source-review.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export tracked source only, never environment or Git credentials
+        run: |
+          mkdir source-review
+          git archive HEAD api lib public test scripts package.json package-lock.json vercel.json | tar -x -C source-review
+      - uses: actions/upload-artifact@v4
+        with:
+          name: attribution-source-review
+          path: source-review
+          retention-days: 1
