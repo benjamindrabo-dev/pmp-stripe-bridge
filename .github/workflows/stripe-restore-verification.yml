@@ -1,0 +1,61 @@
+name: Verify restored Stripe checkout
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/stripe-restore-verification.yml]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Check actual routing and cart totals without submitting payment
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const SITE='https://www.puremajestypet.com',BRIDGE='https://pmp-stripe-bridge.vercel.app',HOST='https://checkout.puremajestypet.com';
+          const report={testedAt:new Date().toISOString(),cases:[],paymentsSubmitted:0,ordersCreated:0,cardDataEntered:false};
+          const read=async url=>{const r=await fetch(url,{signal:AbortSignal.timeout(15000)});assert.ok(r.ok,'READ_FAILED_'+r.status);return r.json();};
+          try{
+            const stripe=await read(HOST+'/api/stripe-health');
+            assert.equal(stripe.serverReady,true,'STRIPE_NOT_READY');
+            report.stripeReady=true;
+            const godaddy=await read(HOST+'/api/godaddy-health');
+            assert.equal(godaddy.launchEnabled,false,'GODADDY_STILL_ENABLED');
+            assert.notEqual(godaddy.newCheckoutRouting,'godaddy','OLD_ROUTING');
+            report.godaddyDisabled=true;
+            for(const country of ['US','CA']){
+              const root=country==='CA'?'/en-ca':'',jar=new Map();
+              async function shop(path,body,form=false){
+                await new Promise(r=>setTimeout(r,1200));
+                const r=await fetch(SITE+path,{method:body?'POST':'GET',redirect:'manual',headers:{Accept:'application/json',...(jar.size?{Cookie:[...jar].map(([k,v])=>k+'='+v).join('; ')}:{}),...(body?{'Content-Type':form?'application/x-www-form-urlencoded':'application/json'}:{})},body:body?(form?new URLSearchParams(body).toString():JSON.stringify(body)):undefined,signal:AbortSignal.timeout(15000)});
+                for(const h of r.headers.getSetCookie()){const p=h.split(';')[0],i=p.indexOf('=');if(i>0)jar.set(p.slice(0,i),p.slice(i+1));}
+                if(r.status===429)throw Error('SHOPIFY_RATE_LIMIT_STOP');
+                return r;
+              }
+              try{
+                await shop(root+'/products/test?variant=43866373914698');
+                await shop('/localization',{form_type:'localization',_method:'put',country_code:country,return_to:root+'/cart'},true);
+                await shop(root+'/cart');
+                const add=await shop(root+'/cart/add.js',{items:[{id:43866373914698,quantity:1}]});assert.ok(add.ok,'ADD_FAILED_'+add.status);
+                const cr=await shop(root+'/cart.js');assert.ok(cr.ok,'CART_READ_FAILED');const cart=await cr.json();
+                assert.equal(cart.items.length,1);assert.ok(cart.total_price>0);
+                const payload={payment_provider:'square',currency:cart.currency,checkout_country:country,locale:'en',marketing_allowed:false,shopify_cart_url:SITE+root+'/cart',shopify_cart_token:cart.token,items:cart.items.map(i=>({variant_id:i.variant_id||i.id,product_id:i.product_id,title:i.product_title||i.title,quantity:i.quantity,price_cents:i.final_price??i.final_line_price/i.quantity,image:i.image}))};
+                const response=await fetch(BRIDGE+'/api/create-checkout',{method:'POST',headers:{Origin:SITE,'Content-Type':'application/json'},body:JSON.stringify(payload),signal:AbortSignal.timeout(60000)});
+                const entry=await response.json();assert.equal(response.status,200,entry.error||entry.code||'ENTRY_FAILED');assert.equal(entry.paymentProvider,'stripe');assert.match(entry.sessionId,/^st_[a-f0-9]{32}$/);assert.equal(entry.amountTotal,cart.total_price);
+                const checkout=new URL(entry.checkoutUrl);assert.equal(checkout.origin,HOST);assert.equal(checkout.pathname,'/square-checkout.html');
+                const q=await read(HOST+'/api/stripe-checkout?session_id='+entry.sessionId);assert.equal(q.paymentProvider,'stripe');assert.equal(q.quote.displayCurrency,cart.currency);assert.equal(Number(q.quote.displayAmount)*100,cart.total_price);assert.equal(q.quote.chargeCurrency,'CAD');assert.equal(q.items.length,1);assert.equal(q.items[0].variantId,43866373914698);
+                const page=await fetch(entry.checkoutUrl,{signal:AbortSignal.timeout(15000)});assert.equal(page.status,200);assert.ok((await page.text()).includes('js.stripe.com'));
+                report.cases.push({country,currency:cart.currency,cartTotalMinor:cart.total_price,checkoutTotalMinor:entry.amountTotal,paymentProvider:entry.paymentProvider,pageHttp:page.status,passed:true});
+              }finally{await shop(root+'/cart/clear.js',{}).catch(()=>{});}
+            }
+            report.passed=true;
+          }catch(e){report.passed=false;report.error=String(e.message).slice(0,180);process.exitCode=1;}
+          report.finishedAt=new Date().toISOString();
+          console.log('STRIPE_RESTORE_VERIFICATION '+JSON.stringify(report));
+          NODE
