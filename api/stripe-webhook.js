@@ -1,3 +1,4 @@
+import { orderNoteSummary } from '../lib/order-note-summary.js';
 // POST /api/stripe-webhook
 // On checkout.session.completed (paid) we create the matching Shopify order,
 // in the same currency the customer paid, with shipping + billing addresses.
@@ -1091,11 +1092,6 @@ export async function createShopifyOrder({ items, currency, email, phone, shippi
     if (value != null && String(value).trim()) noteAttributes.push({ name, value: String(value).trim().slice(0, 500) });
   });
 
-  const acquisitionParts = [`Acquisition: ${attributionSummary.channel.label} (${attributionSummary.basisLabel}).`];
-  if (attributionSummary.primary.landing) acquisitionParts.push(`Page: ${attributionSummary.primary.landing}.`);
-  if (attributionSummary.firstEntry.landing) acquisitionParts.push(`First entry: ${attributionSummary.firstEntry.landing}.`);
-  const acquisitionNote = acquisitionParts.join(" ");
-
   const attributionTags = [
     attributionSummary.basis === "last_paid_click" ? "attribution_last_paid" :
       attributionSummary.basis === "first_free_click" ? "attribution_first_free" : "attribution_session",
@@ -1123,7 +1119,7 @@ export async function createShopifyOrder({ items, currency, email, phone, shippi
     }],
     email: email || undefined,
     phone: phone || undefined,
-    note: `Paid via Stripe (${(currency || "").toUpperCase()}). Stripe session: ${sessionId || "n/a"}. ${acquisitionNote} ${note || ""}`.trim(),
+    note: orderNoteSummary({amount:(charged / 100).toFixed(2), currency:(currency || "").toUpperCase(), attributes:attributionSummary.attributes, note:note || ""}),
     // Machine-readable link back to the Stripe payment (refunds, dedup, audits).
     note_attributes: noteAttributes.length ? noteAttributes : undefined,
     source_identifier: String(sessionId),

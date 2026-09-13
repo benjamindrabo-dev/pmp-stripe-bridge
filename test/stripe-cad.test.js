@@ -10,6 +10,7 @@ for(const [currency,scale,total,charge] of [['USD',100,2899,4000],['EUR',100,269
   const cart={id:'st_'+'a'.repeat(32),displayCurrency:currency,scale,total,subtotal:total,shippingDisplay:0,items:[{variant_id:123,title:'Product',quantity:1,price_cents:total,original_price_cents:total}],attribution:{},quote:{chargeMinor:charge,displayAmount:String(total/scale),displayUnitsPerCad:total/scale/(charge/100)},country:'CA'};
   const a={email:'test@example.invalid',shipping:{first_name:'Test',last_name:'Buyer',address_line_1:'123 Test',locality:'Ottawa',country:'CA'},billing:{first_name:'Test',last_name:'Buyer',address_line_1:'123 Test',locality:'Ottawa',country:'CA'}};
   const o=buildStripeOrder(cart,{id:'pi_test_not_real',livemode:true},a);
+  assert.ok(o.note.startsWith('Total : '+cart.quote.displayAmount+' '+currency+'\n'));assert.match(o.note,/Source :/);assert.match(o.note,/Landing :/);assert.doesNotMatch(o.note,/FX|pi_test|Payment processed/);
   assert.equal(o.currency,'CAD');assert.equal(o.presentmentCurrency,currency);assert.equal(o.transactions[0].gateway,'Stripe');assert.equal(Number(o.transactions[0].amountSet.shopMoney.amount),charge/100);assert.equal(Number(o.transactions[0].amountSet.presentmentMoney.amount),total/scale);assert.equal(o.lineItems[0].requiresShipping,true);assert.equal(o.test,false);assert.ok(!o.tags.includes('square'));
  });
 }

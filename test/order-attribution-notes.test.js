@@ -271,9 +271,9 @@ test("writes a human acquisition summary, report fields and attribution tags to 
   });
   const attrs = attributesMap(order);
 
-  assert.match(order.note, /Acquisition: Meta Ads \(paid\) \(last paid click\)\./);
-  assert.match(order.note, /Page: https:\/\/puremajestypet\.com\/products\/dog-yeast-infection-treatment\./);
-  assert.match(order.note, /First entry: https:\/\/puremajestypet\.com\/blogs\/news\/dog-yeast-infection-treatment\./);
+  assert.match(order.note, /PAID/);
+  assert.match(order.note, /Page attribuée : \/products\/dog-yeast-infection-treatment/);
+  assert.match(order.note, /Landing : \/blogs\/news\/dog-yeast-infection-treatment/);
   assert.equal(attrs.attribution_model, "last_paid_else_first_free_v1");
   assert.equal(attrs.pmp_journey_id, "journey-order-123456");
   assert.equal(attrs.attribution_basis, "last_paid_click");
