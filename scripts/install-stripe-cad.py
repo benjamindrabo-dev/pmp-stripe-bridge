@@ -52,6 +52,10 @@ create=create[:start]+'  await ensureStripeReady();\n'+create[end:]
 create=create.replace('createSquareQuote','createStripeQuote').replace("const id='sq_'", "const id='st_'").replace("provider:'square'", "provider:'stripe'")
 # The legacy transport discriminator keeps already-open storefront tabs compatible.
 create=create.replace("return {provider:'stripe',checkoutUrl", "return {provider:'square',paymentProvider:'stripe',checkoutUrl")
+# Preserve the promotions already active in the Stripe checkout.
+create=replace_once(create,'Preserve the two active Stripe promotions','Preserve the active Stripe promotions')
+create=replace_once(create,"!['WELCOME20','THANK10'].includes(code)","!['WELCOME20','WELCOME10','THANK10'].includes(code)")
+create=replace_once(create,"code==='WELCOME20'?0.8:code==='THANK10'?0.9:1","code==='WELCOME20'?0.8:['WELCOME10','THANK10'].includes(code)?0.9:1")
 contact=between(square,'export async function captureSquareContact','export function publicQuote')
 contact=contact.replace('captureSquareContact','captureStripeContact').replace("'square:contact:'", "'stripe:contact:'")
 public=between(square,'export function publicQuote','function address(raw)')
