@@ -52,6 +52,10 @@ create=create[:start]+'  await ensureStripeReady();\n'+create[end:]
 create=create.replace('createSquareQuote','createStripeQuote').replace("const id='sq_'", "const id='st_'").replace("provider:'square'", "provider:'stripe'")
 # The legacy transport discriminator keeps already-open storefront tabs compatible.
 create=create.replace("return {provider:'stripe',checkoutUrl", "return {provider:'square',paymentProvider:'stripe',checkoutUrl")
+# Preserve the promotions already active in the Stripe checkout.
+create=replace_once(create,'Preserve the two active Stripe promotions','Preserve the active Stripe promotions')
+create=replace_once(create,"!['WELCOME20','THANK10'].includes(code)","!['WELCOME20','WELCOME10','THANK10'].includes(code)")
+create=replace_once(create,"code==='WELCOME20'?0.8:code==='THANK10'?0.9:1","code==='WELCOME20'?0.8:['WELCOME10','THANK10'].includes(code)?0.9:1")
 contact=between(square,'export async function captureSquareContact','export function publicQuote')
 contact=contact.replace('captureSquareContact','captureStripeContact').replace("'square:contact:'", "'stripe:contact:'")
 public=between(square,'export function publicQuote','function address(raw)')
@@ -59,6 +63,23 @@ public=replace_once(public,'applicationId:process.env.SQUARE_APPLICATION_ID,loca
 address=between(square,'function address(raw)','export async function paySquare')
 firstorder=between(square,'async function assertFirstOrder','// Largest-remainder allocation')
 prepare='''
+function preparedIntentState(pi,cart,id){
+ if(pi.currency!=='cad'||pi.amount!==cart.quote.chargeMinor||pi.metadata?.pmp_checkout_id!==id)throw error('Payment amount mismatch');
+ if(['succeeded','processing','requires_capture'].includes(pi.status))return {pending:true};
+ if(pi.status==='canceled')throw error('Please return to the store and start a new checkout.',409);
+ return null;
+}
+async function prepareIntentResponse(pi,cart,id){
+ let pending=preparedIntentState(pi,cart,id);if(pending)return pending;
+ // Legacy attempts can explicitly force Stripe receipts despite Dashboard settings.
+ // Clear that instruction before releasing a client secret for confirmation.
+ if(pi.receipt_email){
+  pi=await stripe('/payment_intents/'+encodeURIComponent(pi.id),{receipt_email:''});
+  pending=preparedIntentState(pi,cart,id);if(pending)return pending;
+  if(pi.receipt_email)throw error('Stripe receipt settings unavailable');
+ }
+ return {clientSecret:pi.client_secret,amount:pi.amount,currency:'CAD'};
+}
 export async function prepareStripePayment(id,body){
  if(!validId(id))throw error('Invalid checkout',400);
  const key='stripe:pay-lock:'+id,token=crypto.randomUUID();
@@ -75,23 +96,24 @@ export async function prepareStripePayment(id,body){
   let attempt=await get('stripe:attempt:'+id);
   if(attempt?.paymentId){
    const pi=await stripe('/payment_intents/'+encodeURIComponent(attempt.paymentId));
-   if(pi.currency!=='cad'||pi.amount!==cart.quote.chargeMinor||pi.metadata?.pmp_checkout_id!==id)throw error('Payment amount mismatch');
-   if(['succeeded','processing','requires_capture'].includes(pi.status))return {pending:true};
-   if(pi.status==='canceled')throw error('Please return to the store and start a new checkout.',409);
+   const response=await prepareIntentResponse(pi,cart,id);if(response.pending)return response;
    // Reuse the existing intent after a decline; a second intent could double-charge.
    await set('stripe:attempt:'+id,{...attempt,email,shipping,billing});
-   return {clientSecret:pi.client_secret,amount:pi.amount,currency:'CAD'};
+   return response;
   }
   assertPayableQuote(cart.quote);
-  const params={amount:String(cart.quote.chargeMinor),currency:'cad','automatic_payment_methods[enabled]':'true',description:'Pure Majesty Pets '+cart.quote.displayAmount+' '+cart.displayCurrency,'metadata[pmp_checkout_id]':id,'metadata[pmp_provider]':'stripe_cad','metadata[pmp_display_currency]':cart.displayCurrency,'metadata[pmp_display_amount]':String(cart.quote.displayAmount),'metadata[pmp_fx_rate]':String(cart.quote.displayUnitsPerCad),receipt_email:email,'shipping[name]':shipping.first_name+' '+shipping.last_name};
+  const params={amount:String(cart.quote.chargeMinor),currency:'cad','automatic_payment_methods[enabled]':'true',description:'Pure Majesty Pets '+cart.quote.displayAmount+' '+cart.displayCurrency,'metadata[pmp_checkout_id]':id,'metadata[pmp_provider]':'stripe_cad','metadata[pmp_display_currency]':cart.displayCurrency,'metadata[pmp_display_amount]':String(cart.quote.displayAmount),'metadata[pmp_fx_rate]':String(cart.quote.displayUnitsPerCad),'shipping[name]':shipping.first_name+' '+shipping.last_name};
   for(const [k,v]of Object.entries({line1:shipping.address_line_1,line2:shipping.address_line_2,city:shipping.locality,state:shipping.administrative_district_level_1,postal_code:shipping.postal_code,country:shipping.country}))if(v)params['shipping[address]['+k+']']=v;
   for(const k of ['shopify_cart_token','journey_id','gclid','gbraid','wbraid'])if(cart.attribution[k])params['metadata['+k+']']=String(cart.attribution[k]).slice(0,500);
   // Persist exactly the request before any network call. Replays use the same
   // body and idempotency key even if the initial API response was lost.
+  const recovering=Boolean(attempt);
   if(!attempt){attempt={email,shipping,billing,request:params,createdAt:Date.now()};await set('stripe:attempt:'+id,attempt);}
-  const pi=await stripe('/payment_intents',attempt.request,id);
+  let pi=await stripe('/payment_intents',attempt.request,id);
   await set('stripe:attempt:'+id,{...attempt,paymentId:pi.id});
-  return {clientSecret:pi.client_secret,amount:pi.amount,currency:'CAD'};
+  // An idempotent replay returns the original response, which may now be stale.
+  if(recovering)pi=await stripe('/payment_intents/'+encodeURIComponent(pi.id));
+  return await prepareIntentResponse(pi,cart,id);
  }finally{await release(key,token);}
 }
 export function buildStripeOrder(cart,payment,attempt){

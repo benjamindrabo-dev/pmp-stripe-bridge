@@ -14,10 +14,34 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - name: Generate isolated Stripe checkout
+      - name: Generate missing Stripe checkout or preserve installed files
         run: |
-          python3 scripts/install-stripe-cad.py
-          sed -i 's/promo_1U6IEuA0auDoBNzsRt1kuqge/promo_1UDccgPw2Aen0E79qBO3wtV4/g' test/create-checkout-wrapper-metadata.test.js
+          stripe_files=(
+            lib/stripe-cad-bridge.js
+            lib/stripe-cad-cart.js
+            api/stripe-checkout.js
+            public/stripe-checkout.js
+            test/stripe-cad.test.js
+          )
+          stripe_installed_count=0
+          for stripe_file in "${stripe_files[@]}"; do
+            if [ -e "$stripe_file" ] || [ -L "$stripe_file" ]; then
+              if [ ! -f "$stripe_file" ] || [ ! -s "$stripe_file" ]; then
+                echo "::error::Invalid Stripe CAD installation path: $stripe_file"
+                exit 1
+              fi
+              stripe_installed_count=$((stripe_installed_count + 1))
+            fi
+          done
+          if [ "$stripe_installed_count" -eq "${#stripe_files[@]}" ]; then
+            echo 'Stripe CAD checkout is already complete; preserving installed files.'
+          elif [ "$stripe_installed_count" -ne 0 ]; then
+            echo '::error::Partial Stripe CAD installation; refusing to overwrite changes.'
+            exit 1
+          else
+            python3 scripts/install-stripe-cad.py
+            sed -i 's/promo_1U6IEuA0auDoBNzsRt1kuqge/promo_1UDccgPw2Aen0E79qBO3wtV4/g' test/create-checkout-wrapper-metadata.test.js
+          fi
       - name: Syntax checks
         run: |
           node --check lib/stripe-cad-bridge.js
@@ -34,5 +58,9 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add lib api public test vercel.json
-          git commit -m 'Add validated Stripe CAD checkout retaining local pricing and original layout'
-          git push
+          if git diff --cached --quiet; then
+            echo 'No generated changes to commit.'
+          else
+            git commit -m 'Add validated Stripe CAD checkout retaining local pricing and original layout'
+            git push
+          fi
