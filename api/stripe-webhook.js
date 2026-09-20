@@ -1581,7 +1581,8 @@ export default async function handler(req, res) {
     return res.status(200).json({ received: true });
   } catch (e) {
     // Unexpected failure: let Stripe retry rather than acknowledging a loss.
-    console.error("Unexpected webhook error:", e);
+    if (e.status === 409 && e.message === 'Order processing') console.warn('Stripe order already processing; webhook will retry');
+    else console.error("Unexpected webhook error:", e);
     return res.status(500).json({ error: "unexpected error, retry" });
   }
 }

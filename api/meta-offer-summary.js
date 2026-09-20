@@ -1158,7 +1158,7 @@ const JS = String.raw`(function(){
         var url = new URL(raw, location.href);
         var storefront = new URL(location.href);
         return url.origin === storefront.origin &&
-          (url.pathname === '/cart/add.js' || url.pathname === '/cart/add');
+          /^\/(?:[a-z]{2}(?:-[a-z]{2})?\/)?cart\/add(?:\.js)?$/i.test(url.pathname);
       } catch (_) { return false; }
     }
 

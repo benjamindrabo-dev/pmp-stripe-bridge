@@ -246,7 +246,7 @@ test("gtag guard installs through a bounded retry when Google loads later", () =
   assert.equal(timers.length, 0);
 });
 
-test("successful Shopify cart additions emit only Clarity and preserve the Response", async () => {
+for(const path of ['/cart/add.js','/es-mx/cart/add.js','/fr/cart/add'])test("successful Shopify cart additions emit only Clarity and preserve the Response: "+path, async () => {
   const responses = [];
   const storefront = storefrontHarness(async () => {
     const response = new FakeResponse({ id: 43433440903242 }, 200);
@@ -255,7 +255,7 @@ test("successful Shopify cart additions emit only Clarity and preserve the Respo
   });
 
   const returned = await storefront.window.fetch(
-    "/cart/add.js",
+    path,
     { method: "POST", body: JSON.stringify({ id: 43433440903242, quantity: 1 }) },
   );
 
