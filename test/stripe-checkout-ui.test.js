@@ -31,5 +31,5 @@ test('the secure Payment Element owns the name and no removed input is read duri
   assert.match(source,/billing_details:\{email:/);
   assert.match(source,/elements\.submit\(\)/);
   assert.match(source,/stripeClient\.confirmPayment/);
-  assert.match(source,/currency:'cad',amount:data\.quote\.chargeMinor/);
+  assert.match(source,/currency:data\.quote\.chargeCurrency\.toLowerCase\(\),amount:data\.quote\.chargeMinor/);
 });

@@ -1,5 +1,5 @@
 import {get,error} from '../lib/square-bridge.js';
-import {validId,publicQuote,captureStripeContact,prepareStripePayment,captureProgress,stripeStatus} from '../lib/stripe-cad-bridge.js';
+import {validId,publicQuote,captureStripeContact,prepareStripePayment,captureProgress,stripeStatus,pendingStripePayment} from '../lib/stripe-cad-bridge.js';
 import {reviseCart,suggestions} from '../lib/stripe-cad-cart.js';
 export default async function handler(req,res){
  res.setHeader('Cache-Control','no-store');
@@ -14,12 +14,12 @@ export default async function handler(req,res){
    if(req.query?.view==='status')return res.status(200).json(await stripeStatus(id));
    if(req.query?.view==='options')return res.status(200).json({suggestions:await suggestions(cart)});
    const done=await get('done:'+id);
-   return res.status(200).json({...publicQuote(cart),completed:Boolean(done)});
+   return res.status(200).json({...publicQuote(cart),completed:Boolean(done),...(!done?await pendingStripePayment(cart):{})});
   }
   const body=req.body||{};
   if(body.action==='prepare')return res.status(200).json(await prepareStripePayment(id,body));
   if(body.action==='contact')return res.status(200).json(await captureStripeContact(id,body.email));
   if(body.action==='progress')return res.status(200).json(await captureProgress(id,body.stage));
   return res.status(200).json(await reviseCart(id,body));
- }catch(e){console.error('Stripe checkout',e.message);return res.status(e.status||503).json({error:e.status&&e.status<500?e.message:'Secure checkout temporarily unavailable. Please refresh.'});}
+ }catch(e){if(!e.status||e.status>=500)console.error('Stripe checkout',e.message);return res.status(e.status||503).json({error:e.status&&e.status<500?e.message:'Secure checkout temporarily unavailable. Please refresh.'});}
 }
