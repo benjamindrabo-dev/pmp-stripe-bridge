@@ -13,6 +13,41 @@ const text={
  it:{checkout:'Pagamento sicuro',contact:'Contatti',email:'E-mail',delivery:'Indirizzo di consegna',first:'Nome',last:'Cognome',country:'Paese',address:'Indirizzo',address2:'Appartamento (facoltativo)',city:'Città',state:'Provincia / regione',zip:'CAP',same:'Indirizzo di fatturazione uguale alla consegna',payment:'Pagamento',pay:'Paga',summary:'Il tuo ordine',shipping:'Spedizione',total:'Totale',promo:'Codice promozionale',apply:'Applica',back:'Torna al negozio',charge:'La tua carta verrà addebitata di {cad} CAD. La banca determina l’importo finale nella valuta della carta e le eventuali commissioni di cambio.'},
  pt:{checkout:'Pagamento seguro',contact:'Contacto',email:'E-mail',delivery:'Endereço de entrega',first:'Nome',last:'Sobrenome',country:'País',address:'Endereço',address2:'Apartamento (opcional)',city:'Cidade',state:'Estado / região',zip:'Código postal',same:'Endereço de faturação igual ao de entrega',payment:'Pagamento',pay:'Pagar',summary:'O seu pedido',shipping:'Entrega',total:'Total',promo:'Código promocional',apply:'Aplicar',back:'Voltar à loja',charge:'Serão cobrados {cad} CAD no seu cartão. O banco determina o valor final na moeda do cartão e eventuais taxas de câmbio.'}
 };
+
+Object.assign(text.en,{secureLoadError:'Secure payment could not load. Please refresh.',amountChanged:'Payment amount changed. Please refresh.',pendingContact:'Your payment is still being confirmed. Please contact us before placing another order.',paymentMethod:'Payment method'});
+Object.assign(text.es,{
+ countryCode:'País de facturación (código de dos letras)',
+ terms:'Al realizar tu pedido, confirmas que has leído nuestra',
+ policy:'política de envíos y devoluciones',
+ loading:'Cargando el pago seguro…',
+ processing:'Confirmando tu pago…',
+ pending:'Tu pago se está confirmando. Mantén esta página abierta.',
+ walletHint:'También puedes pagar con una cartera digital después de completar tu dirección.',
+ expired:'Esta cotización ha vencido. Actualiza el pago para usar el tipo de cambio vigente.',
+ secureLoadError:'No se pudo cargar el pago seguro. Actualiza la página.',
+ amountChanged:'El importe del pago ha cambiado. Actualiza la página.',
+ pendingContact:'Tu pago aún se está confirmando. Contáctanos antes de realizar otro pedido.',
+ paymentMethod:'Método de pago'
+});
+// Apply the checkout market to every storefront exit, including the header.
+function localizeStoreLinks(){
+ const origin='https://www.puremajestypet.com';
+ let prefix='';
+ try{
+  const destination=new URL(data.returnUrl);
+  if(destination.protocol==='https:'&&['puremajestypet.com','www.puremajestypet.com'].includes(destination.hostname)){
+   prefix=destination.pathname.match(/^\/[a-z]{2}(?:-[a-z]{2})?(?=\/|$)/)?.[0]||'';
+  }
+ }catch{}
+ if(!prefix&&data.country==='MX')prefix='/es-mx';
+ const root=origin+prefix;
+ document.querySelectorAll('.return-link, #back').forEach(link=>{link.href=root+'/cart';link.textContent=t.back;});
+ document.querySelectorAll('a.brand').forEach(link=>{link.href=root+'/';});
+ document.querySelectorAll('a[data-i18n="policy"]').forEach(link=>{link.href=root+'/pages/shipping-returns';link.textContent=t.policy;});
+ document.querySelectorAll('[role="radiogroup"]').forEach(group=>group.setAttribute('aria-label',t.paymentMethod));
+ document.title=t.checkout+' — Pure Majesty Pets';
+}
+
 let t=text.en;
 const fmt=amount=>new Intl.NumberFormat(data.locale||'en',{style:'currency',currency:data.quote.displayCurrency,currencyDisplay:'code'}).format(Number(amount));
 async function json(url,body){const r=await fetch(url,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:undefined,body:body?JSON.stringify(body):undefined,cache:'no-store'});const d=await r.json();if(!r.ok)throw Error(d.error||'Checkout unavailable');return d;}
@@ -59,13 +94,15 @@ $('country').addEventListener('change',()=>revise({country:$('country').value}))
 try{
  if(!/^sq_[a-f0-9]{32}$/.test(sessionId||''))throw Error('Invalid checkout link. Please return to the store.');
  data=await json('/api/square-checkout?session_id='+sessionId);
+ t={...text.en,...text[String(data.locale||'en').split('-')[0]]};
+ localizeStoreLinks();
  if(data.successor){location.replace('/square-checkout.html?session_id='+data.successor);return;}
  if(data.completed){const status=await json('/api/session-status?session_id='+sessionId);if(status.returnUrl){location.assign(status.returnUrl);return;}}
  if(data.paymentPending){
-   $('status').textContent='Confirming your payment…';
+   $('status').textContent=t.processing;
    try{const result=await json('/api/square-pay',{sessionId});if(result.returnUrl){location.assign(result.returnUrl);return;}}catch{}
    if(await poll())return;
-   throw Error('Your payment is still being confirmed. Please contact us before placing another order.');
+   throw Error(t.pendingContact);
  }
  if(Date.now()>=Date.parse(data.quote.expiresAt)){const fresh=await json('/api/square-checkout',{sessionId});location.replace(fresh.checkoutUrl);return;}
  for(const [lang,labels] of Object.entries({en:['Express checkout','OR','All transactions are secure and encrypted.'],fr:['Paiement express','OU','Toutes les transactions sont sécurisées et chiffrées.'],de:['Express-Checkout','ODER','Alle Transaktionen sind sicher und verschlüsselt.'],es:['Pago exprés','O','Todas las transacciones son seguras y están cifradas.'],it:['Pagamento rapido','OPPURE','Tutte le transazioni sono sicure e crittografate.'],pt:['Pagamento expresso','OU','Todas as transações são seguras e encriptadas.']}))Object.assign(text[lang],{express:labels[0],or:labels[1],encrypted:labels[2]});
@@ -76,8 +113,8 @@ try{
  for(const c of data.countries||[{code:data.country}]){const o=document.createElement('option');o.value=c.code;o.textContent=new Intl.DisplayNames([data.locale||'en'],{type:'region'}).of(c.code);$('country').append(o);}$('country').value=data.country;$('bcountry').value=data.country;
  for(const it of data.items){const row=document.createElement('div');row.className='line';const label=document.createElement('span');label.textContent=it.title+' × '+it.quantity;const value=document.createElement('span');value.textContent=fmt(Number(it.price)*it.quantity);row.append(label,value);if(it.addon){const remove=document.createElement('button');remove.type='button';remove.className='remove-addon';remove.dataset.cartEdit='1';remove.textContent=extra().remove;remove.onclick=()=>revise({removeAddon:it.variantId});row.append(remove);}$('items').append(row);}
  $('mobile-total').textContent=fmt(data.quote.displayAmount);$('pay-total').textContent=fmt(data.quote.displayAmount);for(const row of $('items').children){const clone=row.cloneNode(true);clone.querySelectorAll('button').forEach(b=>b.remove());$('drawer-items').append(clone);}$('shipping').textContent=fmt(data.shipping);$('total').textContent=fmt(data.quote.displayAmount);$('promo').value=data.promotionCode||'';
- $('charge').textContent=t.charge.replace('{cad}',(data.quote.chargeMinor/100).toFixed(2));$('back').href=data.returnUrl.replace('/pages/thank-you','/cart');
- const script=document.createElement('script');script.src=data.environment==='production'?'https://web.squarecdn.com/v1/square.js':'https://sandbox.web.squarecdn.com/v1/square.js';await new Promise((resolve,reject)=>{script.onload=resolve;script.onerror=()=>reject(Error('Secure payment could not load. Please refresh.'));document.head.append(script);});
+ $('charge').textContent=t.charge.replace('{cad}',(data.quote.chargeMinor/100).toFixed(2));
+ const script=document.createElement('script');script.src=data.environment==='production'?'https://web.squarecdn.com/v1/square.js':'https://sandbox.web.squarecdn.com/v1/square.js';await new Promise((resolve,reject)=>{script.onload=resolve;script.onerror=()=>reject(Error(t.secureLoadError));document.head.append(script);});
  payments=Square.payments(data.applicationId,data.locationId);try{await payments.setLocale(data.locale||'en');}catch{}
  card=await payments.card({style:{'.input-container':{borderColor:'#dedede',borderRadius:'10px'},'.input-container.is-focus':{borderColor:'#4595c5'},input:{fontSize:'14px',fontFamily:'Arial, sans-serif',color:'#111111',backgroundColor:'#ffffff'},'input::placeholder':{color:'#777777'}}});await card.attach('#card');
  for(const event of ['cardBrandChanged','focusClassRemoved','errorClassAdded','errorClassRemoved'])card.addEventListener(event,e=>{if(e.currentState?.isEmpty===false)trackStage('payment_started');});
