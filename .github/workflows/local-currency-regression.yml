@@ -1,0 +1,29 @@
+name: Local currency checkout regression
+on:
+  push:
+    branches:
+      - fix/local-currency-payments-20260921
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Archive tracked source for offline review
+        run: git archive --format=tar HEAD -o /tmp/pmp-checkout-source.tar
+      - name: Offline checkout regression suite
+        run: node --test > /tmp/pmp-currency-tests.txt 2>&1
+      - name: Save source and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-currency-review-${{ github.sha }}
+          path: |
+            /tmp/pmp-checkout-source.tar
+            /tmp/pmp-currency-tests.txt
+          retention-days: 3
