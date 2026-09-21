@@ -3,6 +3,16 @@ on:
   push:
     branches:
       - fix/local-currency-payments-20260921
+      - main
+    paths:
+      - lib/stripe-payment-quote.js
+      - lib/stripe-payment-currencies.js
+      - lib/stripe-cad-bridge.js
+      - test/stripe-local-currency.test.js
+      - test/stripe-cad-payments.test.js
+      - test/stripe-payment-quote.test.js
+      - scripts/verify-local-currency.mjs
+      - .github/workflows/local-currency-regression.yml
 permissions:
   contents: read
 jobs:
@@ -26,4 +36,37 @@ jobs:
           path: |
             /tmp/pmp-checkout-source.tar
             /tmp/pmp-currency-tests.txt
+          retention-days: 3
+  live-form:
+    if: github.ref == 'refs/heads/main'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install browser verification tools
+        run: |
+          mkdir -p /tmp/pmp-qa
+          cd /tmp/pmp-qa
+          npm init -y
+          npm install playwright
+          npx playwright install --with-deps chromium
+      - name: Confirm the production currency release
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS https://checkout.puremajestypet.com/payment-currency-version.json | grep -q local-currency-20260921; then exit 0; fi
+            sleep 4
+          done
+          exit 1
+      - name: Verify actual checkout forms without payments
+        run: node scripts/verify-local-currency.mjs
+      - name: Save market verification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: local-currency-live-${{ github.sha }}
+          path: /tmp/pmp-qa/results
           retention-days: 3

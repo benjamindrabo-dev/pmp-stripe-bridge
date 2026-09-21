@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {prepareStripePayment,settleStripePayment,pendingStripePayment} from '../lib/stripe-cad-bridge.js';
 import {stripePaymentQuote} from '../lib/stripe-payment-quote.js';
 const id='st_'+'d'.repeat(32);
-function fixture(t,{lostResponse=false,mexico=false}={}){
+function fixture(t,{lostResponse=false,mexico=false,local=null}={}){
  const original=globalThis.fetch;
  const env={...process.env};
  Object.assign(process.env,{STRIPE_SECRET_KEY:'sk_live_mock_for_offline_test',UPSTASH_REDIS_REST_URL:'https://redis.invalid',UPSTASH_REDIS_REST_TOKEN:'test',SHOPIFY_STORE_DOMAIN:'test.myshopify.com',SHOPIFY_ADMIN_TOKEN:'test'});
@@ -13,6 +13,11 @@ function fixture(t,{lostResponse=false,mexico=false}={}){
   Object.assign(cart,{country:'MX',displayCurrency:'MXN',total:56300,subtotal:56300,items:[{variant_id:123,title:'Product',quantity:1,price_cents:56300,original_price_cents:56300}]});
   cart.accountingQuote={...cart.quote,displayCurrency:'MXN',displayAmount:'563.00',displayUnitsPerCad:'14.075'};
   cart.quote=stripePaymentQuote(cart.accountingQuote,'MX',cart.total,cart.scale);
+ }
+ if(local){
+  Object.assign(cart,{country:local.country,displayCurrency:local.currency,scale:local.scale,total:local.total,subtotal:local.total,items:[{variant_id:123,title:'Product',quantity:1,price_cents:local.total,original_price_cents:local.total}]});
+  cart.accountingQuote={...cart.quote,displayCurrency:local.currency,displayAmount:String(local.total/local.scale),displayUnitsPerCad:String(local.total/local.scale/40)};
+  cart.quote=stripePaymentQuote(cart.accountingQuote,cart.country,cart.total,cart.scale);
  }
  const db=new Map([['sess:'+id,JSON.stringify(cart)]]),intents=new Map(),counts={created:0,orders:0,posts:0,reads:0,clears:0};
  const createBodies=new Map(),createResponses=new Map(),requests=[];
@@ -36,7 +41,7 @@ function fixture(t,{lostResponse=false,mexico=false}={}){
   if(u==='https://api.stripe.com/v1/payment_intents'&&options.method==='POST'){
    counts.posts++;
    const p=new URLSearchParams(options.body),idem=options.headers['Idempotency-Key'];
-   assert.equal(p.get('currency'),mexico?'mxn':'cad');assert.equal(Number(p.get('amount')),cart.quote.chargeMinor);assert.equal(p.get('metadata[pmp_checkout_id]'),id);assert.equal(idem,id);
+   assert.equal(p.get('currency'),cart.quote.chargeCurrency.toLowerCase());assert.equal(Number(p.get('amount')),cart.quote.chargeMinor);assert.equal(p.get('metadata[pmp_checkout_id]'),id);assert.equal(idem,id);
    requests.push({method:'create',body:options.body,idempotencyKey:idem});
    if(createBodies.has(idem))assert.equal(options.body,createBodies.get(idem),'Create retries must preserve the exact stored request');
    else createBodies.set(idem,options.body);
@@ -62,11 +67,20 @@ function fixture(t,{lostResponse=false,mexico=false}={}){
    const request=JSON.parse(options.body);
    if(request.query.includes('StripeExisting'))return ok({data:{orders:{nodes:existingOrder?[existingOrder]:[]}}});
    if(request.query.includes('orderCreate')){
-    counts.orders++;assert.equal(request.variables.options.sendReceipt,true);assert.equal(request.variables.order.email,body.email);assert.equal(request.variables.order.transactions[0].gateway,'Stripe');assert.equal(request.variables.order.currency,'CAD');assert.equal(request.variables.order.presentmentCurrency,mexico?'MXN':'USD');
+    counts.orders++;assert.equal(request.variables.options.sendReceipt,true);assert.equal(request.variables.order.email,body.email);assert.equal(request.variables.order.transactions[0].gateway,'Stripe');assert.equal(request.variables.order.currency,'CAD');assert.equal(request.variables.order.presentmentCurrency,cart.displayCurrency);
     if(mexico){
      assert.deepEqual(request.variables.order.transactions[0].amountSet,{shopMoney:{amount:'40.00',currencyCode:'CAD'},presentmentMoney:{amount:'563.00',currencyCode:'MXN'}});
      assert.equal(request.variables.order.customAttributes.find(a=>a.key==='pmp_payment_currency').value,'MXN');
      assert.equal(request.variables.order.customAttributes.find(a=>a.key==='pmp_payment_amount').value,'563.00');
+    }
+    if(local){
+     const order=request.variables.order;
+     assert.equal(Number(order.transactions[0].amountSet.shopMoney.amount),40);
+     assert.equal(order.transactions[0].amountSet.shopMoney.currencyCode,'CAD');
+     assert.equal(Number(order.transactions[0].amountSet.presentmentMoney.amount),local.total/local.scale);
+     assert.equal(order.transactions[0].amountSet.presentmentMoney.currencyCode,local.currency);
+     assert.equal(order.customAttributes.find(a=>a.key==='pmp_payment_currency').value,local.currency);
+     assert.equal(Number(order.customAttributes.find(a=>a.key==='pmp_payment_amount').value),local.total/local.scale);
     }
     existingOrder={id:'gid://shopify/Order/1',legacyResourceId:'1',name:'#TEST'};
     return ok({data:{orderCreate:{order:existingOrder,userErrors:[]}}});
@@ -217,4 +231,22 @@ test('a response that still contains a receipt email cannot release a client sec
  const f=fixture(t);f.seedLegacy();f.control.keepReceipt=true;
  await assert.rejects(prepareStripePayment(id,body),/receipt settings unavailable/);
  assert.equal(f.counts.clears,1);
+});
+
+for(const [currency,country,total,scale] of [['USD','US',3199,100],['EUR','FR',2699,100],['GBP','GB',2499,100],['CAD','CA',4000,100],['AUD','AU',4399,100],['NZD','NZ',4799,100],['MXN','MX',56300,100],['JPY','JP',400000,100]]){
+ test('local '+currency+' intent and Shopify order preserve amounts, receipts and idempotency',async t=>{
+  const f=fixture(t,{local:{currency,country,total,scale}});
+  const localBody={...body,shipping:{...address,country},billing:{...address,country},confirmedChargeMinor:f.cart.quote.chargeMinor};
+  const result=await prepareStripePayment(id,localBody);assert.equal(result.currency,currency);assert.equal(result.amount,f.cart.quote.chargeMinor);
+  assert.equal(new URLSearchParams(f.requests[0].body).has('receipt_email'),false);
+  await prepareStripePayment(id,localBody);assert.equal(f.counts.created,1);
+  const pi=f.intents.get(id);Object.assign(pi,{status:'succeeded',amount_received:pi.amount});
+  assert.equal((await settleStripePayment(pi.id)).paid,true);assert.equal((await settleStripePayment(pi.id)).paid,true);assert.equal(f.counts.orders,1);
+ });
+}
+test('lost local USD creation response reuses exactly one unchanged PaymentIntent',async t=>{
+ const f=fixture(t,{local:{currency:'USD',country:'US',total:3199,scale:100},lostResponse:true});
+ const b={...body,confirmedChargeMinor:3199};await assert.rejects(prepareStripePayment(id,b),/lost API response/);
+ assert.equal((await prepareStripePayment(id,b)).currency,'USD');assert.equal(f.counts.created,1);
+ assert.equal(new URLSearchParams(f.requests.find(r=>r.method==='create').body).get('amount'),'3199');
 });
