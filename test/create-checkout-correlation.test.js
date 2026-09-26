@@ -121,6 +121,20 @@ function checkoutRequest(overrides = {}) {
   };
 }
 
+test("Spanish checkout sends the localized return_url to Stripe", async (t) => {
+  installEnvironment(t);
+  process.env.SUCCESS_URL = "https://shop.example/pages/thank-you";
+  const calls = mockServices();
+  const res = responseHarness();
+  await handler(checkoutRequest({
+    checkout_country: "ES", locale: "es-ES",
+    shopify_cart_url: "https://shop.example/cart"
+  }), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(calls.stripe[0].get("return_url"), "https://shop.example/es-es/pages/thank-you?session_id={CHECKOUT_SESSION_ID}");
+  assert.equal(calls.stripe[0].get("locale"), "es");
+});
+
 test("correlates a Shopify cart across Checkout Session, PaymentIntent and Redis", async (t) => {
   installEnvironment(t);
   const calls = mockServices();
