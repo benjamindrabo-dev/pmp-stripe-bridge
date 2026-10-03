@@ -1,6 +1,6 @@
 # Collagen-exclusive probiotic checkout offer
 
-Offer: buy one existing probiotic product pack, receive a second identical pack free. The current catalogue product is a 2 × 60 mL pack, so the offer fulfils two packs. It requires paid collagen variant 43349565112394. It applies once per checkout; no automatic paid addition.
+Offer: buy one existing probiotic product pack, receive a second identical pack free. The offer fulfils two units of the catalogue product, whose name and destination price are fetched live. It requires paid collagen variant 43349565112394. It applies once per checkout; no automatic paid addition.
 
 The first visit to the existing Stripe checkout displays a dismissible modal. A persistent offer card remains available until payment. Declining does not prevent payment. Accepting creates a replacement server quote with two probiotic lines: one at the destination's catalogue price, the second at zero. Both appear in the order and fulfilment. Removing the offer removes both lines. Removing collagen invalidates the pair. Other cart products are unaffected.
 
