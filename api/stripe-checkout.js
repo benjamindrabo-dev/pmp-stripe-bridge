@@ -1,6 +1,7 @@
-import {get,error} from '../lib/square-bridge.js';
+import {get,error,redis} from '../lib/square-bridge.js';
 import {validId,publicQuote,captureStripeContact,prepareStripePayment,captureProgress,stripeStatus,pendingStripePayment} from '../lib/stripe-cad-bridge.js';
-import {reviseCart,suggestions} from '../lib/stripe-cad-cart.js';
+import {reviseCart,suggestions,collagenProbioticOffer} from '../lib/stripe-cad-cart.js';
+import {hasCollagen,recordOfferEvent} from '../lib/collagen-probiotic-offer.js';
 export default async function handler(req,res){
  res.setHeader('Cache-Control','no-store');
  if(!['GET','POST'].includes(req.method))return res.status(405).json({error:'Method not allowed'});
@@ -12,11 +13,18 @@ export default async function handler(req,res){
   const cart=await get('sess:'+id);if(!cart||cart.provider!=='stripe')throw error('Checkout expired',410);
   if(req.method==='GET'){
    if(req.query?.view==='status')return res.status(200).json(await stripeStatus(id));
-   if(req.query?.view==='options')return res.status(200).json({suggestions:await suggestions(cart)});
+   if(req.query?.view==='options'){
+    const [general,offer]=await Promise.all([suggestions(cart).catch(()=>[]),collagenProbioticOffer(cart).catch(()=>null)]);
+    return res.status(200).json({suggestions:offer?general.filter(s=>s.variantId!==offer.variantId):general,collagenProbioticOffer:offer});
+   }
    const done=await get('done:'+id);
    return res.status(200).json({...publicQuote(cart),completed:Boolean(done),...(!done?await pendingStripePayment(cart):{})});
   }
   const body=req.body||{};
+  if(body.action==='offerProgress'){
+   if(cart.supersededBy||!hasCollagen(cart.items)||!['shown','declined'].includes(body.stage))throw error('Invalid offer event',400);
+   await recordOfferEvent(redis,cart,body.stage);return res.status(200).json({ok:true});
+  }
   if(body.action==='prepare')return res.status(200).json(await prepareStripePayment(id,body));
   if(body.action==='contact')return res.status(200).json(await captureStripeContact(id,body.email));
   if(body.action==='progress')return res.status(200).json(await captureProgress(id,body.stage));
